@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from websockets.asyncio.client import connect as ws_connect
 
+from pathlib import Path
 from detector import Detector, decode_frame
 
 # Gemini (optional)
@@ -60,6 +61,15 @@ _cam_proc = None
 _receiver_thread = None
 _stop_camera = threading.Event()
 _camera_paused = threading.Event()  # When set, frames are read but not exposed
+
+# Demo mode
+BACKEND_DIR = Path(__file__).parent
+DEMO_DIR = BACKEND_DIR / "demo_images"
+_demo_mode = False
+_demo_image_index = 0
+_demo_images: list[Path] = sorted(
+    p for p in DEMO_DIR.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")
+) if DEMO_DIR.exists() else []
 
 
 def _kill_pi_camera_procs():
@@ -294,6 +304,13 @@ def health():
     return {"status": "ok", "camera_connected": camera_connected, "voice_configured": voice_ok}
 
 
+@app.post("/demo/toggle")
+def demo_toggle():
+    global _demo_mode
+    _demo_mode = not _demo_mode
+    return {"demo": _demo_mode, "image_count": len(_demo_images)}
+
+
 @app.get("/voice/check")
 def voice_check():
     """Check if voice assistant is properly configured."""
@@ -306,7 +323,21 @@ def voice_check():
 @app.post("/camera/start")
 def camera_start():
     """Start Pi camera via SSH cam_stream, or resume if paused."""
-    global _receiver_thread
+    global _receiver_thread, camera_frame, camera_connected
+
+    # Demo mode: load first demo image as the live feed, no SSH
+    if _demo_mode:
+        if not _demo_images:
+            raise HTTPException(status_code=503, detail="No demo images found in backend/demo_images/")
+        frame = cv2.imread(str(_demo_images[0]))
+        if frame is None:
+            raise HTTPException(status_code=503, detail="Failed to read demo image")
+        frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
+        with camera_frame_lock:
+            camera_frame = frame
+        camera_connected = True
+        print("[camera] Demo mode: loaded first demo image as live feed")
+        return {"status": "connected"}
 
     # If SSH thread is alive and we're just paused, resume instantly
     if _receiver_thread and _receiver_thread.is_alive() and _camera_paused.is_set():
@@ -354,11 +385,18 @@ def camera_start():
 @app.post("/camera/stop")
 def camera_stop():
     """Pause camera streaming (keeps SSH alive for instant resume)."""
-    global camera_connected
+    global camera_connected, camera_frame
+
+    if _demo_mode:
+        camera_connected = False
+        with camera_frame_lock:
+            camera_frame = None
+        print("[camera] Demo mode: stream stopped")
+        return {"status": "stopped"}
+
     _camera_paused.set()
     camera_connected = False
     with camera_frame_lock:
-        global camera_frame
         camera_frame = None
     print("[camera] Stream paused (SSH kept alive)")
     return {"status": "stopped"}
@@ -514,10 +552,23 @@ def _run_capture_pipeline():
 
     Returns (detections, analytics, llm_analysis, image_b64) or raises.
     """
-    with camera_frame_lock:
-        frame = None if camera_frame is None else camera_frame.copy()
-    if frame is None:
-        raise RuntimeError("Camera not streaming")
+    global _demo_image_index
+
+    if _demo_mode:
+        # Demo path: load next demo image round-robin
+        if not _demo_images:
+            raise RuntimeError("No demo images available")
+        img_path = _demo_images[_demo_image_index % len(_demo_images)]
+        _demo_image_index += 1
+        frame = cv2.imread(str(img_path))
+        if frame is None:
+            raise RuntimeError(f"Failed to read demo image: {img_path.name}")
+        frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
+    else:
+        with camera_frame_lock:
+            frame = None if camera_frame is None else camera_frame.copy()
+        if frame is None:
+            raise RuntimeError("Camera not streaming")
 
     t0 = time.perf_counter()
     fh, fw = frame.shape[:2]

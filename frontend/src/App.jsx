@@ -26,7 +26,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 
 // ── Header ──
 
-function HeaderBar({ backendConnected, cameraConnected, voiceActive, sessionElapsed, capturing, operationMode, setOperationMode, flaggedForReview }) {
+function HeaderBar({ backendConnected, cameraConnected, voiceActive, sessionElapsed, capturing, operationMode, setOperationMode, flaggedForReview, demoMode, toggleDemo }) {
   return (
     <div className="header-bar">
       <div className="header-brand">
@@ -51,6 +51,7 @@ function HeaderBar({ backendConnected, cameraConnected, voiceActive, sessionElap
         {flaggedForReview && <div className="header-flag">Review Required</div>}
       </div>
       <div className="header-right">
+        <button className={`demo-btn ${demoMode ? "demo-active" : ""}`} onClick={toggleDemo}>Demo</button>
         <div className="mode-toggle">
           <button className={operationMode === "auto" ? "mode-active" : ""} onClick={() => setOperationMode("auto")}>Auto</button>
           <button className={operationMode === "review" ? "mode-active" : ""} onClick={() => setOperationMode("review")}>Review</button>
@@ -638,6 +639,7 @@ function App() {
   const [showReportPreview, setShowReportPreview] = useState(false);
   const [analyticsHistory, setAnalyticsHistory] = useState([]);
   const [cameraLoading, setCameraLoading] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
 
   // Capture workflow state
   const [captures, setCaptures] = useState([]);
@@ -692,6 +694,15 @@ function App() {
   const switchMode = async (m) => { try { const r = await fetch(`${API_URL}/mode/${m}`, { method: "POST" }); const d = await r.json(); if (d.success) { setMode(d.mode); log(`Analysis mode: ${d.mode === "blood_cell" ? "CBC/Differential" : "General Cytology"}`, "action"); } } catch {} };
   const updateConfidence = async (v) => { setConfidence(v); try { await fetch(`${API_URL}/confidence/${v}`, { method: "POST" }); } catch {} };
   const toggleShapes = async () => { const n = !shapesEnabled; setShapesEnabled(n); try { await fetch(`${API_URL}/shapes/${n}`, { method: "POST" }); } catch {} };
+
+  const toggleDemo = async () => {
+    try {
+      const res = await fetch(`${API_URL}/demo/toggle`, { method: "POST" });
+      const d = await res.json();
+      setDemoMode(d.demo);
+      log(d.demo ? "Demo mode enabled" : "Demo mode disabled", "action");
+    } catch { log("Failed to toggle demo mode", "alert"); }
+  };
 
   const startCamera = useCallback(async () => {
     setCameraLoading(true);
@@ -836,7 +847,7 @@ function App() {
 
   return (
     <div className="dashboard">
-      <HeaderBar backendConnected={backendConnected} cameraConnected={cameraConnected} voiceActive={voiceActive} sessionElapsed={sessionElapsed} capturing={captures.length > 0} operationMode={operationMode} setOperationMode={setOperationMode} flaggedForReview={flaggedForReview} />
+      <HeaderBar backendConnected={backendConnected} cameraConnected={cameraConnected} voiceActive={voiceActive} sessionElapsed={sessionElapsed} capturing={captures.length > 0} operationMode={operationMode} setOperationMode={setOperationMode} flaggedForReview={flaggedForReview} demoMode={demoMode} toggleDemo={toggleDemo} />
 
       <div className="dashboard-body">
         <div className="panel-left">

@@ -184,6 +184,34 @@
   background: var(--amber-bg);
 }
 
+/* Demo button */
+
+.demo-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--text-muted);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin-right: 8px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: all 0.15s;
+}
+
+.demo-btn:hover {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.demo-btn.demo-active {
+  background: var(--amber);
+  color: #fff;
+  border-color: var(--amber);
+}
+
 .mode-toggle {
   display: flex;
   background: var(--bg-inset);
