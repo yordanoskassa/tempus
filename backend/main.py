@@ -497,7 +497,7 @@ def build_voice_settings() -> dict:
     context = "\n".join(context_lines)
 
     return {
-        "type": "SettingsConfiguration",
+        "type": "Settings",
         "audio": {
             "input": {
                 "encoding": "linear16",
@@ -510,11 +510,19 @@ def build_voice_settings() -> dict:
             },
         },
         "agent": {
-            "listen": {"model": "nova-3"},
+            "language": "en",
+            "listen": {
+                "provider": {
+                    "type": "deepgram",
+                    "model": "nova-3",
+                },
+            },
             "think": {
-                "provider": {"type": "open_ai"},
-                "model": "gpt-4o-mini",
-                "instructions": (
+                "provider": {
+                    "type": "open_ai",
+                    "model": "gpt-4o-mini",
+                },
+                "prompt": (
                     "You are Tempus Assistant, a helpful voice assistant for a veterinary "
                     "microscopy lab. You help lab technicians understand cell detection results, "
                     "morphology findings, and answer questions about the analysis.\n\n"
@@ -523,7 +531,12 @@ def build_voice_settings() -> dict:
                     "If asked about results you don't have, say the user should run detection first."
                 ),
             },
-            "speak": {"model": "aura-2-theia-en"},
+            "speak": {
+                "provider": {
+                    "type": "deepgram",
+                    "model": "aura-2-thalia-en",
+                },
+            },
         },
     }
 
