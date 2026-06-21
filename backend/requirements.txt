@@ -5,3 +5,4 @@ numpy==2.2.1
 python-multipart==0.0.20
 websockets==15.0.1
 python-dotenv==1.2.1
+google-genai>=1.0.0
