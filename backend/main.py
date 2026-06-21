@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import socket
-import struct
 import threading
 import time
 from datetime import datetime, timezone
@@ -19,7 +18,7 @@ from detector import Detector, decode_frame
 
 load_dotenv()
 
-app = FastAPI(title="VetrView - Cell Component Detection")
+app = FastAPI(title="Tempus - Hematology Cell Analysis")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,127 +38,121 @@ detector = Detector()
 _last_analytics = {}
 _last_analytics_lock = threading.Lock()
 
-QNX_CAMERA_HOST = os.getenv("QNX_CAMERA_HOST", "qnxpi27.local")
-QNX_CAMERA_PORT = int(os.getenv("QNX_CAMERA_PORT", "8765"))
-QNX_FRAME_MAGIC = 0x514E5846
-qnx_frame = None
-qnx_frame_lock = threading.Lock()
-qnx_camera_connected = False
+PI_HOST = os.getenv("PI_HOST", "qnxpi27.local")
+PI_STREAM_PORT = int(os.getenv("PI_STREAM_PORT", "8765"))
+
+camera_frame = None
+camera_frame_lock = threading.Lock()
+camera_connected = False
 
 
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    chunks = bytearray()
-    while len(chunks) < size:
-        chunk = sock.recv(size - len(chunks))
-        if not chunk:
-            raise ConnectionError("QNX camera bridge disconnected")
-        chunks.extend(chunk)
-    return bytes(chunks)
-
-
-def _resolve_host(host: str, port: int, timeout: float = 3) -> tuple:
-    """Resolve hostname with a timeout to avoid mDNS hangs."""
-    socket.setdefaulttimeout(timeout)
-    try:
-        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-        if infos:
-            return infos[0][4]  # (ip, port)
-    finally:
-        socket.setdefaulttimeout(None)
-    raise OSError(f"Cannot resolve {host}")
-
-
-def _qnx_camera_receiver():
-    """Keep the latest QNX Camera Module 3 frame in memory."""
-    global qnx_frame, qnx_camera_connected
+def _mjpeg_receiver():
+    """Connect to Pi MJPEG TCP stream and decode frames."""
+    global camera_frame, camera_connected
     while True:
         try:
-            addr = _resolve_host(QNX_CAMERA_HOST, QNX_CAMERA_PORT, timeout=5)
+            socket.setdefaulttimeout(5)
+            infos = socket.getaddrinfo(PI_HOST, PI_STREAM_PORT, socket.AF_INET, socket.SOCK_STREAM)
+            socket.setdefaulttimeout(None)
+            if not infos:
+                raise OSError(f"Cannot resolve {PI_HOST}")
+            addr = infos[0][4]
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
             sock.connect(addr)
             sock.settimeout(10)
-            qnx_camera_connected = True
+            camera_connected = True
+
+            buf = b""
             try:
                 while True:
-                    magic, width, height, stride, uv_offset, uv_stride, _format, size = struct.unpack(
-                        "!8I", _recv_exact(sock, 32)
-                    )
-                    if magic != QNX_FRAME_MAGIC or not (0 < size < 32_000_000):
-                        raise ValueError("Invalid QNX camera frame header")
-                    raw = _recv_exact(sock, size)
-                    y_size = stride * height
-                    nv12_size = uv_offset + uv_stride * (height // 2)
-                    if len(raw) >= nv12_size:
-                        source = np.frombuffer(raw, dtype=np.uint8)
-                        y = source[:y_size].reshape(height, stride)[:, :width]
-                        uv = source[uv_offset:nv12_size].reshape(height // 2, uv_stride)[:, :width]
-                        nv12 = np.vstack((y, uv))
-                        frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
-                    elif len(raw) >= y_size:
-                        gray = np.frombuffer(raw[:y_size], dtype=np.uint8).reshape(height, stride)
-                        frame = cv2.cvtColor(gray[:, :width], cv2.COLOR_GRAY2BGR)
-                    else:
-                        raise ValueError("Incomplete QNX camera frame")
-                    with qnx_frame_lock:
-                        qnx_frame = frame
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    # Find JPEG boundaries
+                    while True:
+                        start = buf.find(b"\xff\xd8")
+                        if start == -1:
+                            buf = b""
+                            break
+                        end = buf.find(b"\xff\xd9", start + 2)
+                        if end == -1:
+                            buf = buf[start:]
+                            break
+                        jpeg_data = buf[start:end + 2]
+                        buf = buf[end + 2:]
+                        arr = np.frombuffer(jpeg_data, dtype=np.uint8)
+                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            with camera_frame_lock:
+                                camera_frame = frame
             finally:
                 sock.close()
         except Exception:
-            qnx_camera_connected = False
+            camera_connected = False
             time.sleep(2)
 
 
-threading.Thread(target=_qnx_camera_receiver, daemon=True).start()
+threading.Thread(target=_mjpeg_receiver, daemon=True).start()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "qnx_camera_connected": qnx_camera_connected}
+    api_key = os.getenv("DEEPGRAM_API_KEY", "")
+    voice_ok = bool(api_key and api_key != "your_deepgram_api_key_here")
+    return {"status": "ok", "camera_connected": camera_connected, "voice_configured": voice_ok}
+
+
+@app.get("/voice/check")
+def voice_check():
+    """Check if voice assistant is properly configured."""
+    api_key = os.getenv("DEEPGRAM_API_KEY", "")
+    if not api_key or api_key == "your_deepgram_api_key_here":
+        return {"configured": False, "error": "DEEPGRAM_API_KEY not set in .env"}
+    return {"configured": True, "key_prefix": api_key[:8] + "..."}
 
 
 @app.post("/camera/start")
 def camera_start():
-    """Wait for the QNX camera connection to be established before responding."""
-    if qnx_camera_connected:
-        return {"status": "connected"}
-    # Wait up to 15 seconds for the receiver thread to connect
+    """Wait for the Pi camera connection to be established before responding."""
+    if camera_connected:
+        with camera_frame_lock:
+            if camera_frame is not None:
+                return {"status": "connected"}
+    # Wait up to 15 seconds for the receiver thread to connect and get a frame
     deadline = time.time() + 15
     while time.time() < deadline:
-        if qnx_camera_connected:
-            # Wait a bit more for the first frame
-            frame_deadline = time.time() + 3
-            while time.time() < frame_deadline:
-                with qnx_frame_lock:
-                    if qnx_frame is not None:
-                        return {"status": "connected"}
-                time.sleep(0.2)
-            return {"status": "connected"}
+        if camera_connected:
+            with camera_frame_lock:
+                if camera_frame is not None:
+                    return {"status": "connected"}
         time.sleep(0.5)
     raise HTTPException(
         status_code=503,
-        detail=f"Cannot reach QNX camera at {QNX_CAMERA_HOST}:{QNX_CAMERA_PORT} — check Pi is on and camera bridge is running",
+        detail=f"Cannot reach camera stream at {PI_HOST}:{PI_STREAM_PORT} — check Pi is on and streamer is running",
     )
 
 
-@app.get("/qnx/frame.jpg")
-def qnx_frame_jpeg():
-    with qnx_frame_lock:
-        frame = None if qnx_frame is None else qnx_frame.copy()
+@app.get("/camera/frame.jpg")
+def camera_frame_jpeg():
+    with camera_frame_lock:
+        frame = None if camera_frame is None else camera_frame.copy()
     if frame is None:
-        raise HTTPException(status_code=503, detail="Waiting for QNX camera")
+        raise HTTPException(status_code=503, detail="Camera not streaming")
     ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     if not ok:
         raise HTTPException(status_code=500, detail="JPEG encoding failed")
     return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
 
-@app.get("/qnx/stream")
-def qnx_mjpeg_stream():
+@app.get("/camera/stream")
+def camera_mjpeg_stream():
     def frames():
         while True:
-            with qnx_frame_lock:
-                frame = None if qnx_frame is None else qnx_frame.copy()
+            with camera_frame_lock:
+                frame = None if camera_frame is None else camera_frame.copy()
             if frame is not None:
                 ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
@@ -203,11 +196,11 @@ async def detect_ws(websocket: WebSocket):
             data_url = await websocket.receive_text()
             try:
                 t0 = time.perf_counter()
-                if data_url == "qnx":
-                    with qnx_frame_lock:
-                        frame = None if qnx_frame is None else qnx_frame.copy()
+                if data_url == "pi":
+                    with camera_frame_lock:
+                        frame = None if camera_frame is None else camera_frame.copy()
                     if frame is None:
-                        raise RuntimeError("Waiting for QNX camera frame")
+                        raise RuntimeError("Camera not streaming")
                 else:
                     frame = decode_frame(data_url)
                 fh, fw = frame.shape[:2]
@@ -348,7 +341,7 @@ async def generate_report(request: Request):
         assessment += " RECOMMENDATION: Close monitoring advised; consider further analysis."
 
     report = {
-        "report_id": f"VR-{session_id[:8].upper()}",
+        "report_id": f"TX-{session_id[:8].upper()}",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "session": {
             "id": session_id,
@@ -401,7 +394,7 @@ def build_voice_settings() -> dict:
                 "provider": {"type": "open_ai"},
                 "model": "gpt-4o-mini",
                 "instructions": (
-                    "You are VetrView Assistant, a helpful voice assistant for a veterinary "
+                    "You are Tempus Assistant, a helpful voice assistant for a veterinary "
                     "microscopy lab. You help lab technicians understand cell detection results, "
                     "morphology findings, and answer questions about the analysis.\n\n"
                     "Current detector state:\n" + context + "\n\n"

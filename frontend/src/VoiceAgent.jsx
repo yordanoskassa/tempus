@@ -1,12 +1,14 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 const VOICE_WS_URL = "ws://localhost:8000/ws/voice";
+const API_URL = "http://localhost:8000";
 
 export default function VoiceAgent({ onStatusChange, onActiveChange, expanded }) {
   const [active, setActive] = useState(false);
-  const [status, setStatus] = useState("idle"); // idle | connecting | listening | agent_speaking
+  const [status, setStatus] = useState("idle"); // idle | checking | connecting | listening | agent_speaking
   const [transcript, setTranscript] = useState([]);
   const [error, setError] = useState(null);
+  const [configured, setConfigured] = useState(null); // null = unknown, true/false
 
   const wsRef = useRef(null);
   const micStreamRef = useRef(null);
@@ -14,6 +16,17 @@ export default function VoiceAgent({ onStatusChange, onActiveChange, expanded })
   const audioCtxRef = useRef(null);
   const playbackCtxRef = useRef(null);
   const nextPlayTimeRef = useRef(0);
+
+  // Check voice configuration on mount
+  useEffect(() => {
+    fetch(`${API_URL}/voice/check`)
+      .then(r => r.json())
+      .then(d => {
+        setConfigured(d.configured);
+        if (!d.configured) setError(d.error || "Voice not configured");
+      })
+      .catch(() => setConfigured(null));
+  }, []);
 
   // Notify parent of status changes
   useEffect(() => {
@@ -81,6 +94,23 @@ export default function VoiceAgent({ onStatusChange, onActiveChange, expanded })
   const startVoice = useCallback(async () => {
     setError(null);
     setTranscript([]);
+    setStatus("checking");
+
+    // Pre-check voice configuration
+    try {
+      const check = await fetch(`${API_URL}/voice/check`);
+      const checkData = await check.json();
+      if (!checkData.configured) {
+        setError(checkData.error || "Voice service not configured");
+        setStatus("idle");
+        return;
+      }
+    } catch {
+      setError("Backend not reachable");
+      setStatus("idle");
+      return;
+    }
+
     setStatus("connecting");
 
     try {
@@ -99,7 +129,16 @@ export default function VoiceAgent({ onStatusChange, onActiveChange, expanded })
 
       ws.binaryType = "arraybuffer";
 
+      // Connection timeout
+      const connectTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          setError("Connection timed out - check backend is running");
+          cleanup();
+        }
+      }, 10000);
+
       ws.onopen = () => {
+        clearTimeout(connectTimeout);
         setActive(true);
         setStatus("listening");
 
@@ -163,19 +202,24 @@ export default function VoiceAgent({ onStatusChange, onActiveChange, expanded })
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
+        clearTimeout(connectTimeout);
+        if (e.code !== 1000 && e.code !== 1005 && active) {
+          setError(`Connection closed unexpectedly (code ${e.code})`);
+        }
         cleanup();
       };
 
       ws.onerror = () => {
-        setError("WebSocket connection failed");
+        clearTimeout(connectTimeout);
+        setError("WebSocket connection failed - is the backend running?");
         cleanup();
       };
     } catch (err) {
-      setError(err.message || "Mic access denied");
+      setError(err.message || "Microphone access denied");
       cleanup();
     }
-  }, [cleanup, playAudioChunk]);
+  }, [cleanup, playAudioChunk, active]);
 
   const endVoice = useCallback(() => {
     cleanup();
@@ -188,6 +232,8 @@ export default function VoiceAgent({ onStatusChange, onActiveChange, expanded })
   const statusLabel =
     status === "idle"
       ? "Ready"
+      : status === "checking"
+      ? "Checking..."
       : status === "connecting"
       ? "Connecting..."
       : status === "listening"
@@ -205,14 +251,24 @@ export default function VoiceAgent({ onStatusChange, onActiveChange, expanded })
     <div className={`voice-panel ${expanded ? "voice-expanded" : ""}`}>
       <h3>Voice Assistant</h3>
 
-      {error && <div className="voice-error">{error}</div>}
+      {error && (
+        <div className="voice-error">
+          {error}
+          <button className="voice-error-dismiss" onClick={() => setError(null)}>{"\u00d7"}</button>
+        </div>
+      )}
+
+      {configured === false && !error && (
+        <div className="voice-warning">Deepgram API key not configured in backend/.env</div>
+      )}
 
       <div className="voice-controls">
         <button
           className={`voice-btn ${active ? "voice-btn-active" : ""}`}
           onClick={active ? endVoice : startVoice}
+          disabled={status === "checking" || status === "connecting"}
         >
-          {active ? "End Voice" : "Start Voice"}
+          {active ? "End Voice" : status === "checking" ? "Checking..." : status === "connecting" ? "Connecting..." : "Start Voice"}
         </button>
         <div className={`voice-status ${statusClass}`}>
           <div className="voice-status-dot" />
