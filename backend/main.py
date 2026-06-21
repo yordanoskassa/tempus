@@ -89,7 +89,7 @@ def _pi_camera_reader():
         "sshpass", "-p", PI_SSH_PASS,
         "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
         PI_SSH_HOST,
-        f"/tmp/cam_stream -u 1 -w {CAM_WIDTH} -h {CAM_HEIGHT} -r {CAM_FPS}",
+        f"/home/qnxuser/cam_stream -u 1 -w {CAM_WIDTH} -h {CAM_HEIGHT} -r {CAM_FPS}",
     ]
 
     # NV12 frame size: width * height * 1.5
