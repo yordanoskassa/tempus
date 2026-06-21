@@ -4,7 +4,7 @@ import VoiceAgent from "./VoiceAgent";
 
 const WS_URL = "ws://localhost:8000/ws/detect";
 const API_URL = "http://localhost:8000";
-const FRAME_INTERVAL_MS = 200;
+const FRAME_INTERVAL_MS = 100;
 
 function App() {
   const videoRef = useRef(null);
@@ -62,31 +62,17 @@ function App() {
   };
 
   const startCamera = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480 },
-        audio: false,
-      });
-      streamRef.current = stream;
-      setStreaming(true);
-    } catch (err) {
-      console.error("Camera access denied:", err);
-    }
+    setStreaming(true);
   }, []);
 
   useEffect(() => {
-    if (streaming && videoRef.current && streamRef.current) {
-      videoRef.current.srcObject = streamRef.current;
-    }
+    // QNX frames are displayed by the MJPEG image below.
   }, [streaming]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
     }
     clearInterval(intervalRef.current);
     setStreaming(false);
@@ -130,13 +116,7 @@ function App() {
       const video = videoRef.current;
       const ws = wsRef.current;
       if (!video || !ws || ws.readyState !== WebSocket.OPEN) return;
-      if (!video.videoWidth || !video.videoHeight) return;
-      const canvas = captureCanvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0);
-      ws.send(canvas.toDataURL("image/jpeg", 0.7));
+      ws.send("qnx");
     };
 
     intervalRef.current = setInterval(sendFrame, FRAME_INTERVAL_MS);
@@ -149,8 +129,8 @@ function App() {
     const video = videoRef.current;
     if (!canvas || !video) return;
 
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
+    canvas.width = video.naturalWidth || 2304;
+    canvas.height = video.naturalHeight || 1296;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -250,7 +230,7 @@ function App() {
         <div className="camera-panel">
           {streaming ? (
             <div className="video-container">
-              <video ref={videoRef} autoPlay playsInline muted />
+              <img ref={videoRef} src={`${API_URL}/qnx/stream`} alt="QNX Camera Module 3" />
               <canvas ref={canvasRef} />
             </div>
           ) : (
