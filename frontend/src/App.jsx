@@ -37,7 +37,7 @@ function HeaderBar({ backendConnected, qnxConnected, voiceActive, sessionElapsed
       </div>
       <div className="header-center">
         <div className="conn-row">
-          <div className={`conn-item ${qnxConnected ? "on" : ""}`}><div className="conn-dot" />QNX</div>
+          <div className={`conn-item ${qnxConnected ? "on" : ""}`}><div className="conn-dot" />Camera</div>
           <div className={`conn-item ${backendConnected ? "on" : ""}`}><div className="conn-dot" />Backend</div>
           <div className={`conn-item ${voiceActive ? "on" : ""}`}><div className="conn-dot" />Voice</div>
         </div>
@@ -328,7 +328,7 @@ function App() {
   useEffect(() => { fetch(`${API_URL}/status`).then(r => r.json()).then(d => { setMode(d.mode); setAvailableModes(d.available_modes); setConfidence(d.conf_threshold); setShapesEnabled(d.shapes_enabled); }).catch(() => {}); }, []);
 
   useEffect(() => {
-    const poll = () => fetch(`${API_URL}/health`).then(r => r.json()).then(d => { setBackendConnected(d.status === "ok"); setQnxConnected(d.qnx_camera_connected === true); }).catch(() => { setBackendConnected(false); setQnxConnected(false); });
+    const poll = () => fetch(`${API_URL}/health`).then(r => r.json()).then(d => { setBackendConnected(d.status === "ok"); setQnxConnected(d.camera_connected === true); }).catch(() => { setBackendConnected(false); setQnxConnected(false); });
     poll(); const id = setInterval(poll, 5000); return () => clearInterval(id);
   }, []);
 
@@ -355,8 +355,27 @@ function App() {
   const updateConfidence = async (v) => { setConfidence(v); try { await fetch(`${API_URL}/confidence/${v}`, { method: "POST" }); } catch {} };
   const toggleShapes = async () => { const n = !shapesEnabled; setShapesEnabled(n); try { await fetch(`${API_URL}/shapes/${n}`, { method: "POST" }); } catch {} };
 
-  const startCamera = useCallback(() => { setStreaming(true); log("Camera started", "action"); }, [log]);
-  const stopCamera = useCallback(() => { if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; } clearInterval(intervalRef.current); setStreaming(false); setDetecting(false); setDetections([]); log("Camera stopped", "action"); }, [log]);
+  const startCamera = useCallback(async () => {
+    log("Connecting to Pi camera...", "action");
+    try {
+      const res = await fetch(`${API_URL}/camera/start`, { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Connection failed" }));
+        log(`Camera error: ${err.detail}`, "alert");
+        return;
+      }
+      setStreaming(true);
+      log("Camera streaming", "action");
+    } catch (e) {
+      log(`Camera error: ${e.message}`, "alert");
+    }
+  }, [log]);
+  const stopCamera = useCallback(async () => {
+    clearInterval(intervalRef.current);
+    setStreaming(false); setDetecting(false); setDetections([]);
+    try { await fetch(`${API_URL}/camera/stop`, { method: "POST" }); } catch {}
+    log("Camera stopped", "action");
+  }, [log]);
 
   const connectWs = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -371,7 +390,7 @@ function App() {
     if (detecting) { clearInterval(intervalRef.current); setDetecting(false); setDetections([]); log("Detection stopped", "action"); return; }
     if (!streaming) return;
     connectWs();
-    intervalRef.current = setInterval(() => { const ws = wsRef.current; if (!ws || ws.readyState !== WebSocket.OPEN) return; ws.send("qnx"); }, FRAME_INTERVAL_MS);
+    intervalRef.current = setInterval(() => { const ws = wsRef.current; if (!ws || ws.readyState !== WebSocket.OPEN) return; ws.send("pi"); }, FRAME_INTERVAL_MS);
     setDetecting(true); log("Detection started", "action");
   }, [detecting, streaming, connectWs, log]);
 
@@ -435,13 +454,13 @@ function App() {
           <div className="camera-section">
             {streaming ? (
               <div className="video-container">
-                <img ref={videoRef} src={`${API_URL}/qnx/stream`} alt="QNX Camera" />
+                <img ref={videoRef} src={streaming ? `${API_URL}/camera/stream` : ""} alt="Pi Camera" />
                 <canvas ref={canvasRef} />
               </div>
             ) : (
               <div className="no-camera">
                 <p>No camera feed</p>
-                <p className="cam-hint">Connect the QNX camera module to begin analysis</p>
+                <p className="cam-hint">Connect to Pi camera to begin analysis</p>
                 <button onClick={startCamera}>Start Camera</button>
               </div>
             )}
