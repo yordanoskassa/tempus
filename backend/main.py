@@ -216,24 +216,30 @@ def camera_start():
                 return {"status": "connected"}
 
     # Step 1: Start streamer on Pi
+    print("[camera] Ensuring Pi streamer is running...")
     if not _ensure_pi_streamer():
         raise HTTPException(status_code=503, detail="Failed to start streamer on Pi via SSH")
+    print("[camera] Pi streamer OK")
 
     # Step 2: Establish SSH tunnel
+    print("[camera] Establishing SSH tunnel...")
     if not _ensure_ssh_tunnel():
         raise HTTPException(status_code=503, detail="Failed to establish SSH tunnel to Pi")
+    print("[camera] SSH tunnel OK")
 
     # Step 3: Start receiver thread
     if not _receiver_thread or not _receiver_thread.is_alive():
         _stop_camera.clear()
         _receiver_thread = threading.Thread(target=_mjpeg_receiver, daemon=True)
         _receiver_thread.start()
+        print("[camera] Receiver thread started")
 
     # Step 4: Wait for first frame
     deadline = time.time() + 10
     while time.time() < deadline:
         with camera_frame_lock:
             if camera_frame is not None:
+                print("[camera] First frame received!")
                 return {"status": "connected"}
         time.sleep(0.3)
 
