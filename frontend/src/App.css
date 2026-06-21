@@ -238,6 +238,49 @@ header h1 span {
   margin-top: 2px;
 }
 
+.stat-card.highlight .stat-value {
+  color: #ff6b6b;
+}
+
+.breakdown-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.breakdown-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.breakdown-label {
+  color: #ccc;
+}
+
+.breakdown-value {
+  color: #4fc3f7;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.breakdown-bar-bg {
+  grid-column: 1 / -1;
+  height: 3px;
+  background: #1a1a2e;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.breakdown-bar {
+  height: 100%;
+  background: #4fc3f7;
+  border-radius: 2px;
+  transition: width 0.2s;
+}
+
 .no-camera {
   display: flex;
   flex-direction: column;

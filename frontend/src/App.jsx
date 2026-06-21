@@ -17,6 +17,7 @@ function App() {
   const [detecting, setDetecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [detections, setDetections] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
   const [fps, setFps] = useState(0);
   const [mode, setMode] = useState("general");
   const [availableModes, setAvailableModes] = useState(["general"]);
@@ -105,6 +106,7 @@ function App() {
       if (data.detections) {
         setDetections(data.detections);
         if (data.mode) setMode(data.mode);
+        if (data.analytics) setAnalytics(data.analytics);
         const now = Date.now();
         setFps(Math.round(1000 / (now - lastFrameTime.current)));
         lastFrameTime.current = now;
@@ -333,8 +335,61 @@ function App() {
                 <div className="stat-value">{shapeDets.length}</div>
                 <div className="stat-label">Shapes</div>
               </div>
+              <div className="stat-card">
+                <div className="stat-value">
+                  {analytics?.inference_ms ?? "—"}
+                </div>
+                <div className="stat-label">Latency (ms)</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">
+                  {analytics?.coverage_pct ?? 0}%
+                </div>
+                <div className="stat-label">Coverage</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">
+                  {analytics?.avg_cell_area ?? 0}
+                </div>
+                <div className="stat-label">Avg Area (px)</div>
+              </div>
+              <div className="stat-card highlight">
+                <div className="stat-value">
+                  {analytics?.abnormal_pct ?? 0}%
+                </div>
+                <div className="stat-label">Abnormal</div>
+              </div>
             </div>
           </div>
+
+          {/* Class Breakdown */}
+          {analytics?.class_counts &&
+            Object.keys(analytics.class_counts).length > 0 && (
+              <div className="sidebar-section">
+                <h3>Class Breakdown</h3>
+                <div className="breakdown-list">
+                  {Object.entries(analytics.class_counts).map(
+                    ([cls, count]) => (
+                      <div key={cls} className="breakdown-row">
+                        <span className="breakdown-label">{cls}</span>
+                        <span className="breakdown-value">{count}</span>
+                        <div className="breakdown-bar-bg">
+                          <div
+                            className="breakdown-bar"
+                            style={{
+                              width: `${Math.min(
+                                (count / (analytics.cell_count || 1)) * 100,
+                                100
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
 
           {/* YOLO detections */}
           <div className="sidebar-section">
