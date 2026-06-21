@@ -59,6 +59,7 @@ camera_connected = False
 _cam_proc = None
 _receiver_thread = None
 _stop_camera = threading.Event()
+_camera_paused = threading.Event()  # When set, frames are read but not exposed
 
 
 def _kill_pi_camera_procs():
@@ -104,6 +105,77 @@ class FrameReader:
                 return None
             buf.extend(chunk)
         return bytes(buf)
+
+
+def _center_crop_and_enhance(frame, crop_ratio=0.65):
+    """Center-crop and sharpen frame to remove dark circular lens edges."""
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+    crop_w, crop_h = int(w * crop_ratio) // 2, int(h * crop_ratio) // 2
+    cropped = frame[cy - crop_h:cy + crop_h, cx - crop_w:cx + crop_w]
+    # Unsharp mask for sharpening
+    gaussian = cv2.GaussianBlur(cropped, (0, 0), 2.0)
+    sharpened = cv2.addWeighted(cropped, 1.5, gaussian, -0.5, 0)
+    return sharpened
+
+
+def _draw_annotations(frame, detections):
+    """Draw YOLO bounding boxes, labels, confidence, and morphology tags on a frame copy."""
+    annotated = frame.copy()
+    for det in detections:
+        x, y, w, h = det["bbox"]
+        color_bgr = det.get("color", [0, 255, 0])
+        # OpenCV uses BGR tuples
+        color = tuple(color_bgr)
+        conf = det.get("confidence", 0)
+        label = det.get("label", "")
+        det_type = det.get("type", "yolo")
+
+        if det_type == "shape":
+            # Dashed rectangle for shape detections
+            dash_len = 8
+            # Top edge
+            for i in range(x, x + w, dash_len * 2):
+                cv2.line(annotated, (i, y), (min(i + dash_len, x + w), y), color, 2)
+            # Bottom edge
+            for i in range(x, x + w, dash_len * 2):
+                cv2.line(annotated, (i, y + h), (min(i + dash_len, x + w), y + h), color, 2)
+            # Left edge
+            for i in range(y, y + h, dash_len * 2):
+                cv2.line(annotated, (x, i), (x, min(i + dash_len, y + h)), color, 2)
+            # Right edge
+            for i in range(y, y + h, dash_len * 2):
+                cv2.line(annotated, (x + w, i), (x + w, min(i + dash_len, y + h)), color, 2)
+        else:
+            # Solid rectangle for YOLO detections
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
+
+        # Label + confidence tag
+        tag = f"{label} {conf:.0%}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.45
+        thickness = 1
+        (tw, th), baseline = cv2.getTextSize(tag, font, font_scale, thickness)
+        # Background rectangle for label
+        cv2.rectangle(annotated, (x, y - th - baseline - 4), (x + tw + 4, y), color, -1)
+        # Text color: white or black depending on brightness
+        brightness = sum(color_bgr) / 3
+        text_color = (0, 0, 0) if brightness > 140 else (255, 255, 255)
+        cv2.putText(annotated, tag, (x + 2, y - baseline - 2), font, font_scale, text_color, thickness, cv2.LINE_AA)
+
+        # Morphology sub-label for abnormal cells
+        morph = det.get("morphology")
+        if morph and morph != "Normal":
+            morph_color = tuple(det.get("morph_color", [255, 255, 255]))
+            morph_tag = f"[{morph}]"
+            (mw, mh), mb = cv2.getTextSize(morph_tag, font, font_scale, thickness)
+            morph_y = y + h + mh + mb + 4
+            cv2.rectangle(annotated, (x, y + h + 2), (x + mw + 4, morph_y + 2), morph_color, -1)
+            morph_brightness = sum(det.get("morph_color", [255, 255, 255])) / 3
+            morph_text_color = (0, 0, 0) if morph_brightness > 140 else (255, 255, 255)
+            cv2.putText(annotated, morph_tag, (x + 2, morph_y - 2), font, font_scale, morph_text_color, thickness, cv2.LINE_AA)
+
+    return annotated
 
 
 def _pi_camera_reader():
@@ -163,6 +235,15 @@ def _pi_camera_reader():
                 if frame.shape[1] != CAM_WIDTH or frame.shape[0] != CAM_HEIGHT:
                     frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
 
+                # Center-crop and sharpen to remove dark circular lens edges
+                frame = _center_crop_and_enhance(frame)
+
+                # When paused, keep reading (keeps SSH alive) but don't expose frames
+                if _camera_paused.is_set():
+                    camera_connected = False
+                    continue
+
+                camera_connected = True
                 with camera_frame_lock:
                     camera_frame = frame
 
@@ -224,8 +305,22 @@ def voice_check():
 
 @app.post("/camera/start")
 def camera_start():
-    """Start Pi camera via SSH cam_stream."""
+    """Start Pi camera via SSH cam_stream, or resume if paused."""
     global _receiver_thread
+
+    # If SSH thread is alive and we're just paused, resume instantly
+    if _receiver_thread and _receiver_thread.is_alive() and _camera_paused.is_set():
+        _camera_paused.clear()
+        print("[camera] Resuming stream (SSH still alive)")
+        # Wait briefly for first resumed frame
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if camera_connected:
+                with camera_frame_lock:
+                    if camera_frame is not None:
+                        return {"status": "connected"}
+            time.sleep(0.1)
+        return {"status": "connected"}
 
     # Already streaming?
     if camera_connected:
@@ -236,6 +331,7 @@ def camera_start():
     # Start reader thread (handles SSH, cam_stream, and frame reading)
     if not _receiver_thread or not _receiver_thread.is_alive():
         _stop_camera.clear()
+        _camera_paused.clear()
         _receiver_thread = threading.Thread(target=_pi_camera_reader, daemon=True)
         _receiver_thread.start()
         print("[camera] Camera reader thread started")
@@ -257,9 +353,22 @@ def camera_start():
 
 @app.post("/camera/stop")
 def camera_stop():
-    """Stop camera streaming."""
-    _stop_camera_system()
+    """Pause camera streaming (keeps SSH alive for instant resume)."""
+    global camera_connected
+    _camera_paused.set()
+    camera_connected = False
+    with camera_frame_lock:
+        global camera_frame
+        camera_frame = None
+    print("[camera] Stream paused (SSH kept alive)")
     return {"status": "stopped"}
+
+
+@app.post("/camera/disconnect")
+def camera_disconnect():
+    """Fully disconnect camera and tear down SSH."""
+    _stop_camera_system()
+    return {"status": "disconnected"}
 
 
 @app.get("/camera/frame.jpg")
@@ -421,13 +530,17 @@ def _run_capture_pipeline():
     with _last_analytics_lock:
         _last_analytics.update(analytics)
 
-    # Encode frame as JPEG for Gemini and for returning to client
-    ok, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    jpeg_bytes = jpeg_buf.tobytes() if ok else b""
+    # Encode raw frame as JPEG for Gemini (cleaner for vision analysis)
+    ok, raw_jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    raw_jpeg_bytes = raw_jpeg_buf.tobytes() if ok else b""
 
-    llm_analysis = _call_gemini_analysis(jpeg_bytes, detections, analytics) if jpeg_bytes else None
+    llm_analysis = _call_gemini_analysis(raw_jpeg_bytes, detections, analytics) if raw_jpeg_bytes else None
 
-    image_b64 = base64.b64encode(jpeg_bytes).decode("utf-8") if jpeg_bytes else ""
+    # Draw annotations on a copy for the gallery/UI image
+    annotated = _draw_annotations(frame, detections)
+    ok, ann_jpeg_buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    ann_jpeg_bytes = ann_jpeg_buf.tobytes() if ok else b""
+    image_b64 = base64.b64encode(ann_jpeg_bytes).decode("utf-8") if ann_jpeg_bytes else ""
 
     return detections, analytics, llm_analysis, image_b64
 
@@ -456,10 +569,15 @@ async def capture_analyze(request: Request):
         analytics = _compute_analytics(detections, fw, fh, inference_ms)
         with _last_analytics_lock:
             _last_analytics.update(analytics)
-        ok, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        jpeg_bytes = jpeg_buf.tobytes() if ok else b""
-        llm_analysis = _call_gemini_analysis(jpeg_bytes, detections, analytics) if jpeg_bytes else None
-        image_b64 = base64.b64encode(jpeg_bytes).decode("utf-8") if jpeg_bytes else ""
+        # Raw JPEG for Gemini
+        ok, raw_jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        raw_jpeg_bytes = raw_jpeg_buf.tobytes() if ok else b""
+        llm_analysis = _call_gemini_analysis(raw_jpeg_bytes, detections, analytics) if raw_jpeg_bytes else None
+        # Annotated JPEG for gallery/UI
+        annotated = _draw_annotations(frame, detections)
+        ok, ann_jpeg_buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        ann_jpeg_bytes = ann_jpeg_buf.tobytes() if ok else b""
+        image_b64 = base64.b64encode(ann_jpeg_bytes).decode("utf-8") if ann_jpeg_bytes else ""
 
     # Compute alert level
     abnormal = analytics.get("abnormal_pct", 0)
