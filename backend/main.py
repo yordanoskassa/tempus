@@ -1,7 +1,8 @@
 import asyncio
 import json
 import os
-import subprocess
+import socket
+import struct
 import threading
 import time
 from datetime import datetime, timezone
@@ -38,158 +39,85 @@ detector = Detector()
 _last_analytics = {}
 _last_analytics_lock = threading.Lock()
 
-# Pi Camera via SSH
-PI_SSH_HOST = os.getenv("PI_SSH_HOST", "pi@raspberrypi.local")
-PI_CAMERA_WIDTH = int(os.getenv("PI_CAMERA_WIDTH", "1280"))
-PI_CAMERA_HEIGHT = int(os.getenv("PI_CAMERA_HEIGHT", "720"))
-
-pi_frame = None
-pi_frame_lock = threading.Lock()
-pi_camera_connected = False
-_pi_process = None
-_pi_reader_thread = None
+QNX_CAMERA_HOST = os.getenv("QNX_CAMERA_HOST", "qnxpi27.local")
+QNX_CAMERA_PORT = int(os.getenv("QNX_CAMERA_PORT", "8765"))
+QNX_FRAME_MAGIC = 0x514E5846
+qnx_frame = None
+qnx_frame_lock = threading.Lock()
+qnx_camera_connected = False
 
 
-def _pi_camera_reader(proc: subprocess.Popen):
-    """Read MJPEG stream from SSH pipe and decode frames."""
-    global pi_frame, pi_camera_connected
-    buf = b""
-    pi_camera_connected = True
-    try:
-        while proc.poll() is None:
-            chunk = proc.stdout.read(8192)
-            if not chunk:
-                break
-            buf += chunk
-            # Parse MJPEG: find JPEG start (FFD8) and end (FFD9) markers
-            while True:
-                start = buf.find(b"\xff\xd8")
-                if start == -1:
-                    buf = b""
-                    break
-                end = buf.find(b"\xff\xd9", start + 2)
-                if end == -1:
-                    # Keep from start marker onward, wait for more data
-                    buf = buf[start:]
-                    break
-                jpeg_data = buf[start:end + 2]
-                buf = buf[end + 2:]
-                # Decode JPEG to BGR frame
-                arr = np.frombuffer(jpeg_data, dtype=np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    with pi_frame_lock:
-                        pi_frame = frame
-    except Exception:
-        pass
-    finally:
-        pi_camera_connected = False
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = sock.recv(size - len(chunks))
+        if not chunk:
+            raise ConnectionError("QNX camera bridge disconnected")
+        chunks.extend(chunk)
+    return bytes(chunks)
 
 
-def start_pi_camera() -> str:
-    """SSH to Pi and start camera stream. Returns error string or empty on success."""
-    global _pi_process, _pi_reader_thread, pi_camera_connected, pi_frame
-
-    if _pi_process and _pi_process.poll() is None:
-        return ""  # Already running
-
-    # rpicam-vid outputs MJPEG to stdout over SSH
-    cmd = [
-        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-        PI_SSH_HOST,
-        f"rpicam-vid -t 0 --codec mjpeg --width {PI_CAMERA_WIDTH} --height {PI_CAMERA_HEIGHT} --framerate 15 -o -"
-    ]
-
-    try:
-        _pi_process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-    except Exception as e:
-        return f"Failed to start SSH: {e}"
-
-    # Wait briefly for connection to establish or fail
-    time.sleep(2)
-    if _pi_process.poll() is not None:
-        stderr = _pi_process.stderr.read().decode(errors="replace").strip()
-        _pi_process = None
-        return f"SSH connection failed: {stderr}"
-
-    # Start reader thread
-    _pi_reader_thread = threading.Thread(target=_pi_camera_reader, args=(_pi_process,), daemon=True)
-    _pi_reader_thread.start()
-
-    # Wait for first frame (up to 8 seconds)
-    deadline = time.time() + 8
-    while time.time() < deadline:
-        with pi_frame_lock:
-            if pi_frame is not None:
-                return ""
-        time.sleep(0.2)
-
-    # Timed out waiting for frames
-    if not pi_camera_connected:
-        stop_pi_camera()
-        return "Connected to Pi but no frames received — is the camera attached?"
-    return ""
-
-
-def stop_pi_camera():
-    """Stop the SSH camera process."""
-    global _pi_process, pi_camera_connected, pi_frame
-    if _pi_process:
+def _qnx_camera_receiver():
+    """Keep the latest QNX Camera Module 3 frame in memory."""
+    global qnx_frame, qnx_camera_connected
+    while True:
         try:
-            _pi_process.terminate()
-            _pi_process.wait(timeout=5)
+            with socket.create_connection((QNX_CAMERA_HOST, QNX_CAMERA_PORT), timeout=5) as sock:
+                sock.settimeout(10)
+                qnx_camera_connected = True
+                while True:
+                    magic, width, height, stride, uv_offset, uv_stride, _format, size = struct.unpack(
+                        "!8I", _recv_exact(sock, 32)
+                    )
+                    if magic != QNX_FRAME_MAGIC or not (0 < size < 32_000_000):
+                        raise ValueError("Invalid QNX camera frame header")
+                    raw = _recv_exact(sock, size)
+                    y_size = stride * height
+                    nv12_size = uv_offset + uv_stride * (height // 2)
+                    if len(raw) >= nv12_size:
+                        source = np.frombuffer(raw, dtype=np.uint8)
+                        y = source[:y_size].reshape(height, stride)[:, :width]
+                        uv = source[uv_offset:nv12_size].reshape(height // 2, uv_stride)[:, :width]
+                        nv12 = np.vstack((y, uv))
+                        frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+                    elif len(raw) >= y_size:
+                        gray = np.frombuffer(raw[:y_size], dtype=np.uint8).reshape(height, stride)
+                        frame = cv2.cvtColor(gray[:, :width], cv2.COLOR_GRAY2BGR)
+                    else:
+                        raise ValueError("Incomplete QNX camera frame")
+                    with qnx_frame_lock:
+                        qnx_frame = frame
         except Exception:
-            try:
-                _pi_process.kill()
-            except Exception:
-                pass
-        _pi_process = None
-    pi_camera_connected = False
-    with pi_frame_lock:
-        pi_frame = None
+            qnx_camera_connected = False
+            time.sleep(1)
+
+
+threading.Thread(target=_qnx_camera_receiver, daemon=True).start()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "camera_connected": pi_camera_connected}
+    return {"status": "ok", "qnx_camera_connected": qnx_camera_connected}
 
 
-@app.post("/camera/start")
-def camera_start():
-    """SSH to Pi, start camera, wait for first frame."""
-    err = start_pi_camera()
-    if err:
-        raise HTTPException(status_code=503, detail=err)
-    return {"status": "streaming", "resolution": [PI_CAMERA_WIDTH, PI_CAMERA_HEIGHT]}
-
-
-@app.post("/camera/stop")
-def camera_stop():
-    """Stop Pi camera stream."""
-    stop_pi_camera()
-    return {"status": "stopped"}
-
-
-@app.get("/camera/frame.jpg")
-def camera_frame_jpeg():
-    with pi_frame_lock:
-        frame = None if pi_frame is None else pi_frame.copy()
+@app.get("/qnx/frame.jpg")
+def qnx_frame_jpeg():
+    with qnx_frame_lock:
+        frame = None if qnx_frame is None else qnx_frame.copy()
     if frame is None:
-        raise HTTPException(status_code=503, detail="Camera not streaming")
+        raise HTTPException(status_code=503, detail="Waiting for QNX camera")
     ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     if not ok:
         raise HTTPException(status_code=500, detail="JPEG encoding failed")
     return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
 
-@app.get("/camera/stream")
-def camera_mjpeg_stream():
+@app.get("/qnx/stream")
+def qnx_mjpeg_stream():
     def frames():
         while True:
-            with pi_frame_lock:
-                frame = None if pi_frame is None else pi_frame.copy()
+            with qnx_frame_lock:
+                frame = None if qnx_frame is None else qnx_frame.copy()
             if frame is not None:
                 ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
@@ -233,11 +161,11 @@ async def detect_ws(websocket: WebSocket):
             data_url = await websocket.receive_text()
             try:
                 t0 = time.perf_counter()
-                if data_url == "pi":
-                    with pi_frame_lock:
-                        frame = None if pi_frame is None else pi_frame.copy()
+                if data_url == "qnx":
+                    with qnx_frame_lock:
+                        frame = None if qnx_frame is None else qnx_frame.copy()
                     if frame is None:
-                        raise RuntimeError("Camera not streaming")
+                        raise RuntimeError("Waiting for QNX camera frame")
                 else:
                     frame = decode_frame(data_url)
                 fh, fw = frame.shape[:2]

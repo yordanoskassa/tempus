@@ -165,11 +165,11 @@ def decode_jpeg_np(jpeg_bytes: bytes) -> np.ndarray:
 def stream_to_lcd():
     lcd = ST7789()
     print(f"LCD initialized ({LCD_WIDTH}x{LCD_HEIGHT})")
-    print(f"Connecting to {VETRVIEW_HOST}/camera/stream ...")
+    print(f"Connecting to {VETRVIEW_HOST}/qnx/stream ...")
 
     while True:
         try:
-            resp = urlopen(f"{VETRVIEW_HOST}/camera/stream", timeout=10)
+            resp = urlopen(f"{VETRVIEW_HOST}/qnx/stream", timeout=10)
             buf = b""
             while True:
                 chunk = resp.read(4096)
