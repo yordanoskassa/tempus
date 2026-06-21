@@ -140,6 +140,7 @@ def _pi_camera_reader():
             camera_connected = True
             print("[camera] Connected, reading MJPEG frames...")
             reader = MJPEGReader(_cam_proc.stdout)
+            warmup_done = False
 
             while not _stop_camera.is_set():
                 jpeg_data = reader.read_frame()
@@ -148,9 +149,19 @@ def _pi_camera_reader():
                 frame = cv2.imdecode(
                     np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR
                 )
-                if frame is not None:
-                    with camera_frame_lock:
-                        camera_frame = frame
+                if frame is None:
+                    continue
+
+                # Skip initial dark frames while auto-exposure settles
+                if not warmup_done:
+                    brightness = frame.mean()
+                    if brightness < 30:
+                        continue
+                    warmup_done = True
+                    print("[camera] Auto-exposure settled, streaming frames")
+
+                with camera_frame_lock:
+                    camera_frame = frame
 
         except ConnectionError:
             print("[camera] cam_stream disconnected")
