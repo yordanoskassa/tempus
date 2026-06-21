@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import socket
 import subprocess
 import threading
 import time
@@ -39,146 +38,132 @@ detector = Detector()
 _last_analytics = {}
 _last_analytics_lock = threading.Lock()
 
-PI_HOST = os.getenv("PI_HOST", "127.0.0.1")  # Through SSH tunnel
-PI_STREAM_PORT = int(os.getenv("PI_STREAM_PORT", "8765"))
 PI_SSH_HOST = os.getenv("PI_SSH_HOST", "qnxuser@qnxpi27.local")
 PI_SSH_PASS = os.getenv("PI_SSH_PASS", "qnxuser")
+CAM_WIDTH = 640
+CAM_HEIGHT = 480
+CAM_FPS = 15
 
 camera_frame = None
 camera_frame_lock = threading.Lock()
 camera_connected = False
-_ssh_tunnel_proc = None
+_cam_proc = None
 _receiver_thread = None
 _stop_camera = threading.Event()
 
 
-def _ensure_ssh_tunnel():
-    """Start SSH tunnel forwarding PI_STREAM_PORT from Pi to localhost."""
-    global _ssh_tunnel_proc
-    if _ssh_tunnel_proc and _ssh_tunnel_proc.poll() is None:
-        # Check if tunnel is actually working
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2)
-            s.connect(("127.0.0.1", PI_STREAM_PORT))
-            s.close()
-            return True
-        except Exception:
-            # Tunnel process alive but not forwarding — kill and retry
-            _ssh_tunnel_proc.terminate()
-            _ssh_tunnel_proc = None
+def _read_exact(stream, size):
+    """Read exactly `size` bytes from a binary stream."""
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = stream.read(size - len(chunks))
+        if not chunk:
+            raise ConnectionError("cam_stream pipe closed")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _kill_pi_camera_procs():
+    """Kill any existing camera processes on the Pi."""
+    cmd = [
+        "sshpass", "-p", PI_SSH_PASS,
+        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+        PI_SSH_HOST,
+        "slay cam_stream 2>/dev/null; slay camera_bridge 2>/dev/null; "
+        "slay camera_example3_viewfinder 2>/dev/null; slay qnx-camera-bridge 2>/dev/null",
+    ]
+    try:
+        subprocess.run(cmd, timeout=15, capture_output=True)
+        time.sleep(1)
+    except Exception:
+        pass
+
+
+def _pi_camera_reader():
+    """SSH into Pi, run cam_stream, read raw NV12 frames from stdout."""
+    global camera_frame, camera_connected, _cam_proc
+
+    _kill_pi_camera_procs()
 
     cmd = [
         "sshpass", "-p", PI_SSH_PASS,
         "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-        "-o", "ExitOnForwardFailure=yes",
-        "-N", "-L", f"{PI_STREAM_PORT}:127.0.0.1:{PI_STREAM_PORT}",
         PI_SSH_HOST,
+        f"/tmp/cam_stream -u 1 -w {CAM_WIDTH} -h {CAM_HEIGHT} -r {CAM_FPS}",
     ]
-    try:
-        _ssh_tunnel_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # Wait for tunnel to be ready
-        for _ in range(10):
-            time.sleep(1)
-            if _ssh_tunnel_proc.poll() is not None:
-                stderr = _ssh_tunnel_proc.stderr.read().decode(errors="replace")
-                print(f"SSH tunnel failed: {stderr}")
-                return False
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2)
-                s.connect(("127.0.0.1", PI_STREAM_PORT))
-                s.close()
-                return True
-            except Exception:
-                continue
-        return False
-    except Exception:
-        return False
 
+    # NV12 frame size: width * height * 1.5
+    frame_size = CAM_WIDTH * CAM_HEIGHT * 3 // 2
 
-def _ensure_pi_streamer():
-    """Ensure the pi_streamer.py is running on the Pi via SSH."""
-    # Check if already running by trying to see if port is bound
-    check_cmd = [
-        "sshpass", "-p", PI_SSH_PASS,
-        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-        PI_SSH_HOST,
-        "python3 -c \"import socket; s=socket.socket(); r=s.connect_ex(('127.0.0.1',8765)); print(r); s.close()\"",
-    ]
-    try:
-        result = subprocess.run(check_cmd, timeout=15, capture_output=True, text=True)
-        if result.stdout.strip() == "0":
-            return True  # Already running
-    except Exception:
-        pass
-
-    # Start it
-    start_cmd = [
-        "sshpass", "-p", PI_SSH_PASS,
-        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-        PI_SSH_HOST,
-        "nohup python3 /home/qnxuser/pi_streamer.py --test > /dev/null 2>&1 &",
-    ]
-    try:
-        subprocess.run(start_cmd, timeout=15, capture_output=True)
-        time.sleep(4)  # Give streamer time to start
-        return True
-    except Exception:
-        return False
-
-
-def _mjpeg_receiver():
-    """Connect to Pi MJPEG TCP stream (via SSH tunnel) and decode frames."""
-    global camera_frame, camera_connected
     while not _stop_camera.is_set():
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((PI_HOST, PI_STREAM_PORT))
-            sock.settimeout(10)
-            camera_connected = True
+            print(f"[camera] Starting cam_stream via SSH ({CAM_WIDTH}x{CAM_HEIGHT} NV12)...")
+            _cam_proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=frame_size
+            )
 
-            buf = b""
-            try:
-                while not _stop_camera.is_set():
-                    chunk = sock.recv(65536)
-                    if not chunk:
-                        break
-                    buf += chunk
-                    # Find JPEG boundaries
-                    while True:
-                        start = buf.find(b"\xff\xd8")
-                        if start == -1:
-                            buf = b""
-                            break
-                        end = buf.find(b"\xff\xd9", start + 2)
-                        if end == -1:
-                            buf = buf[start:]
-                            break
-                        jpeg_data = buf[start:end + 2]
-                        buf = buf[end + 2:]
-                        arr = np.frombuffer(jpeg_data, dtype=np.uint8)
-                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                        if frame is not None:
-                            with camera_frame_lock:
-                                camera_frame = frame
-            finally:
-                sock.close()
-        except Exception:
+            # Read stderr in background for diagnostics
+            def _read_stderr():
+                for line in _cam_proc.stderr:
+                    msg = line.decode(errors="replace").strip()
+                    if msg:
+                        print(f"[cam_stream] {msg}")
+            stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+            stderr_thread.start()
+
+            # Wait briefly for process to start
+            time.sleep(0.5)
+            if _cam_proc.poll() is not None:
+                print("[camera] cam_stream exited immediately")
+                time.sleep(3)
+                continue
+
+            camera_connected = True
+            print("[camera] Connected, reading frames...")
+
+            while not _stop_camera.is_set():
+                raw = _read_exact(_cam_proc.stdout, frame_size)
+
+                # Convert NV12 to BGR using OpenCV
+                nv12 = np.frombuffer(raw, dtype=np.uint8).reshape(
+                    CAM_HEIGHT * 3 // 2, CAM_WIDTH
+                )
+                frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+
+                with camera_frame_lock:
+                    camera_frame = frame
+
+        except ConnectionError:
+            print("[camera] cam_stream disconnected")
+        except Exception as e:
+            print(f"[camera] Error: {e}")
+        finally:
             camera_connected = False
+            if _cam_proc:
+                _cam_proc.terminate()
+                try:
+                    _cam_proc.wait(timeout=3)
+                except Exception:
+                    _cam_proc.kill()
+                _cam_proc = None
             if not _stop_camera.is_set():
-                time.sleep(2)
+                print("[camera] Reconnecting in 3s...")
+                time.sleep(3)
+
     camera_connected = False
 
 
 def _stop_camera_system():
-    """Stop SSH tunnel and receiver."""
-    global _ssh_tunnel_proc, _receiver_thread, camera_frame, camera_connected
+    """Stop camera reader and SSH process."""
+    global _cam_proc, _receiver_thread, camera_frame, camera_connected
     _stop_camera.set()
-    if _ssh_tunnel_proc:
-        _ssh_tunnel_proc.terminate()
-        _ssh_tunnel_proc = None
+    if _cam_proc:
+        _cam_proc.terminate()
+        try:
+            _cam_proc.wait(timeout=3)
+        except Exception:
+            _cam_proc.kill()
+        _cam_proc = None
     if _receiver_thread:
         _receiver_thread.join(timeout=5)
         _receiver_thread = None
@@ -206,7 +191,7 @@ def voice_check():
 
 @app.post("/camera/start")
 def camera_start():
-    """Start Pi camera: launch streamer, SSH tunnel, and frame receiver."""
+    """Start Pi camera via SSH cam_stream."""
     global _receiver_thread
 
     # Already streaming?
@@ -215,27 +200,15 @@ def camera_start():
             if camera_frame is not None:
                 return {"status": "connected"}
 
-    # Step 1: Start streamer on Pi
-    print("[camera] Ensuring Pi streamer is running...")
-    if not _ensure_pi_streamer():
-        raise HTTPException(status_code=503, detail="Failed to start streamer on Pi via SSH")
-    print("[camera] Pi streamer OK")
-
-    # Step 2: Establish SSH tunnel
-    print("[camera] Establishing SSH tunnel...")
-    if not _ensure_ssh_tunnel():
-        raise HTTPException(status_code=503, detail="Failed to establish SSH tunnel to Pi")
-    print("[camera] SSH tunnel OK")
-
-    # Step 3: Start receiver thread
+    # Start reader thread (handles SSH, cam_stream, and frame reading)
     if not _receiver_thread or not _receiver_thread.is_alive():
         _stop_camera.clear()
-        _receiver_thread = threading.Thread(target=_mjpeg_receiver, daemon=True)
+        _receiver_thread = threading.Thread(target=_pi_camera_reader, daemon=True)
         _receiver_thread.start()
-        print("[camera] Receiver thread started")
+        print("[camera] Camera reader thread started")
 
-    # Step 4: Wait for first frame
-    deadline = time.time() + 10
+    # Wait for first frame
+    deadline = time.time() + 15
     while time.time() < deadline:
         with camera_frame_lock:
             if camera_frame is not None:
@@ -245,7 +218,7 @@ def camera_start():
 
     raise HTTPException(
         status_code=503,
-        detail="Connected to Pi but no frames received — check camera",
+        detail="Connected to Pi but no frames received — check camera or cam_stream binary",
     )
 
 
