@@ -28,7 +28,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 
 // ── Header ──
 
-function HeaderBar({ backendConnected, qnxConnected, voiceActive, sessionElapsed, detecting, operationMode, setOperationMode, flaggedForReview }) {
+function HeaderBar({ backendConnected, cameraConnected, voiceActive, sessionElapsed, detecting, operationMode, setOperationMode, flaggedForReview }) {
   return (
     <div className="header-bar">
       <div className="header-brand">
@@ -37,7 +37,7 @@ function HeaderBar({ backendConnected, qnxConnected, voiceActive, sessionElapsed
       </div>
       <div className="header-center">
         <div className="conn-row">
-          <div className={`conn-item ${qnxConnected ? "on" : ""}`}><div className="conn-dot" />QNX</div>
+          <div className={`conn-item ${cameraConnected ? "on" : ""}`}><div className="conn-dot" />Camera</div>
           <div className={`conn-item ${backendConnected ? "on" : ""}`}><div className="conn-dot" />Backend</div>
           <div className={`conn-item ${voiceActive ? "on" : ""}`}><div className="conn-dot" />Voice</div>
         </div>
@@ -128,7 +128,7 @@ function LiveStatsGrid({ analytics, fps, detecting, totalDetections, mode }) {
 
 function MorphologyBars({ morphologyCounts }) {
   if (!morphologyCounts || Object.keys(morphologyCounts).length === 0) return null;
-  const colors = { Normal: "#34d399", Sickle: "#f87171", Teardrop: "#fbbf24", Acanthocyte: "#fb923c", "Burr/Echinocyte": "#f97316", Spherocyte: "#fb7185", Elliptocyte: "#e879f9", Target: "#a78bfa", "N/A": "#475569" };
+  const colors = { Normal: "#346538", Sickle: "#9F2F2D", Teardrop: "#956400", Acanthocyte: "#b85c00", "Burr/Echinocyte": "#a04800", Spherocyte: "#9F2F2D", Elliptocyte: "#7c3aed", Target: "#6d28d9", "N/A": "#787774" };
   const sorted = Object.entries(morphologyCounts).sort((a, b) => b[1] - a[1]);
   const max = Math.max(...sorted.map(([, c]) => c), 1);
   return (
@@ -153,7 +153,7 @@ function MorphologyBars({ morphologyCounts }) {
 
 function ClassBreakdownChips({ classCounts }) {
   if (!classCounts || Object.keys(classCounts).length === 0) return null;
-  const colors = { RBC: "#f87171", WBC: "#22d3ee", Platelet: "#fbbf24" };
+  const colors = { RBC: "#9F2F2D", WBC: "#1F6C9F", Platelet: "#956400" };
   return (
     <div>
       <div className="section-label">Classification</div>
@@ -265,14 +265,14 @@ function ReportPreview({ reportData, onClose }) {
 // ── Detection List ──
 
 function DetectionList({ summary, detecting }) {
-  if (Object.keys(summary).length === 0) return <p style={{ color: "var(--text-3)", fontSize: 12 }}>{detecting ? "Analyzing..." : "No detections"}</p>;
+  if (Object.keys(summary).length === 0) return <p style={{ color: "var(--text-faint)", fontSize: 12 }}>{detecting ? "Analyzing..." : "No detections"}</p>;
   return (
     <ul className="detection-list">
       {Object.entries(summary).map(([label, info]) => (
         <li key={label} className="detection-item">
           <div className="detection-label">
             <div className="detection-color" style={{ background: `rgb(${info.color[0]},${info.color[1]},${info.color[2]})` }} />
-            {label}{info.count > 1 && <span style={{ color: "var(--text-3)" }}> x{info.count}</span>}
+            {label}{info.count > 1 && <span style={{ color: "var(--text-muted)" }}> x{info.count}</span>}
           </div>
           <span className="detection-confidence">{Math.round(info.maxConf * 100)}%</span>
         </li>
@@ -315,7 +315,7 @@ function App() {
   const [snapshots, setSnapshots] = useState([]);
   const [flaggedForReview, setFlaggedForReview] = useState(false);
   const [backendConnected, setBackendConnected] = useState(false);
-  const [qnxConnected, setQnxConnected] = useState(false);
+  const [cameraConnected, setCameraConnected] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
   const [, setVoiceStatus] = useState("idle");
   const [showReportPreview, setShowReportPreview] = useState(false);
@@ -328,7 +328,7 @@ function App() {
   useEffect(() => { fetch(`${API_URL}/status`).then(r => r.json()).then(d => { setMode(d.mode); setAvailableModes(d.available_modes); setConfidence(d.conf_threshold); setShapesEnabled(d.shapes_enabled); }).catch(() => {}); }, []);
 
   useEffect(() => {
-    const poll = () => fetch(`${API_URL}/health`).then(r => r.json()).then(d => { setBackendConnected(d.status === "ok"); setQnxConnected(d.qnx_camera_connected === true); }).catch(() => { setBackendConnected(false); setQnxConnected(false); });
+    const poll = () => fetch(`${API_URL}/health`).then(r => r.json()).then(d => { setBackendConnected(d.status === "ok"); setCameraConnected(d.qnx_camera_connected === true || d.camera_connected === true); }).catch(() => { setBackendConnected(false); setCameraConnected(false); });
     poll(); const id = setInterval(poll, 5000); return () => clearInterval(id);
   }, []);
 
@@ -446,20 +446,20 @@ function App() {
 
   return (
     <div className="dashboard">
-      <HeaderBar backendConnected={backendConnected} qnxConnected={qnxConnected} voiceActive={voiceActive} sessionElapsed={sessionElapsed} detecting={detecting} operationMode={operationMode} setOperationMode={setOperationMode} flaggedForReview={flaggedForReview} />
+      <HeaderBar backendConnected={backendConnected} cameraConnected={cameraConnected} voiceActive={voiceActive} sessionElapsed={sessionElapsed} detecting={detecting} operationMode={operationMode} setOperationMode={setOperationMode} flaggedForReview={flaggedForReview} />
 
       <div className="dashboard-body">
         <div className="panel-left">
           <div className="camera-section">
             {streaming ? (
               <div className="video-container">
-                <img ref={videoRef} src={`${API_URL}/qnx/stream`} alt="QNX Camera" />
+                <img ref={videoRef} src={`${API_URL}/qnx/stream`} alt="Camera Feed" />
                 <canvas ref={canvasRef} />
               </div>
             ) : (
               <div className="no-camera">
                 <p>{cameraLoading ? "Connecting to Pi..." : "No camera feed"}</p>
-                <p className="cam-hint">Connect the QNX camera module to begin analysis</p>
+                <p className="cam-hint">Connect the camera module to begin analysis</p>
                 <button onClick={startCamera} disabled={cameraLoading}>{cameraLoading ? "Connecting..." : "Start Camera"}</button>
               </div>
             )}

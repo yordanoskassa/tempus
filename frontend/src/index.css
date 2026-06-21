@@ -7,9 +7,9 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  background: #060b15;
-  color: #c8d3e0;
+  font-family: 'SF Pro Display', 'Helvetica Neue', -apple-system, system-ui, sans-serif;
+  background: #F7F6F3;
+  color: #2F3437;
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
