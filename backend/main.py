@@ -100,6 +100,30 @@ def health():
     return {"status": "ok", "qnx_camera_connected": qnx_camera_connected}
 
 
+@app.post("/camera/start")
+def camera_start():
+    """Wait for the QNX camera connection to be established before responding."""
+    if qnx_camera_connected:
+        return {"status": "connected"}
+    # Wait up to 15 seconds for the receiver thread to connect
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if qnx_camera_connected:
+            # Wait a bit more for the first frame
+            frame_deadline = time.time() + 3
+            while time.time() < frame_deadline:
+                with qnx_frame_lock:
+                    if qnx_frame is not None:
+                        return {"status": "connected"}
+                time.sleep(0.2)
+            return {"status": "connected"}
+        time.sleep(0.5)
+    raise HTTPException(
+        status_code=503,
+        detail=f"Cannot reach QNX camera at {QNX_CAMERA_HOST}:{QNX_CAMERA_PORT} — check Pi is on and camera bridge is running",
+    )
+
+
 @app.get("/qnx/frame.jpg")
 def qnx_frame_jpeg():
     with qnx_frame_lock:

@@ -355,7 +355,25 @@ function App() {
   const updateConfidence = async (v) => { setConfidence(v); try { await fetch(`${API_URL}/confidence/${v}`, { method: "POST" }); } catch {} };
   const toggleShapes = async () => { const n = !shapesEnabled; setShapesEnabled(n); try { await fetch(`${API_URL}/shapes/${n}`, { method: "POST" }); } catch {} };
 
-  const startCamera = useCallback(() => { setStreaming(true); log("Camera started", "action"); }, [log]);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const startCamera = useCallback(async () => {
+    setCameraLoading(true);
+    log("Connecting to Pi camera...", "action");
+    try {
+      const res = await fetch(`${API_URL}/camera/start`, { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Connection failed" }));
+        log(`Camera error: ${err.detail}`, "alert");
+        return;
+      }
+      setStreaming(true);
+      log("Camera connected", "action");
+    } catch (e) {
+      log(`Camera error: ${e.message}`, "alert");
+    } finally {
+      setCameraLoading(false);
+    }
+  }, [log]);
   const stopCamera = useCallback(() => { if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; } clearInterval(intervalRef.current); setStreaming(false); setDetecting(false); setDetections([]); log("Camera stopped", "action"); }, [log]);
 
   const connectWs = useCallback(() => {
@@ -440,9 +458,9 @@ function App() {
               </div>
             ) : (
               <div className="no-camera">
-                <p>No camera feed</p>
+                <p>{cameraLoading ? "Connecting to Pi..." : "No camera feed"}</p>
                 <p className="cam-hint">Connect the QNX camera module to begin analysis</p>
-                <button onClick={startCamera}>Start Camera</button>
+                <button onClick={startCamera} disabled={cameraLoading}>{cameraLoading ? "Connecting..." : "Start Camera"}</button>
               </div>
             )}
           </div>
@@ -450,7 +468,7 @@ function App() {
           <div className="ctrl-section">
             <div className="section-label">Controls</div>
             <div className="ctrl-row">
-              <button className={`ctrl-btn ${streaming ? "ctrl-active" : ""}`} onClick={streaming ? stopCamera : startCamera}>{streaming ? "Stop Camera" : "Start Camera"}</button>
+              <button className={`ctrl-btn ${streaming ? "ctrl-active" : ""}`} onClick={streaming ? stopCamera : startCamera} disabled={cameraLoading}>{cameraLoading ? "Connecting..." : streaming ? "Stop Camera" : "Start Camera"}</button>
               <button className={`ctrl-btn ${detecting ? "ctrl-active" : ""}`} onClick={toggleDetection} disabled={!streaming}>{detecting ? "Stop" : "Detect"}</button>
             </div>
           </div>
