@@ -2,7 +2,8 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import "./App.css";
 
 const WS_URL = "ws://localhost:8000/ws/detect";
-const FRAME_INTERVAL_MS = 200; // 5 fps to backend
+const API_URL = "http://localhost:8000";
+const FRAME_INTERVAL_MS = 200;
 
 function App() {
   const videoRef = useRef(null);
@@ -17,7 +18,37 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [detections, setDetections] = useState([]);
   const [fps, setFps] = useState(0);
+  const [mode, setMode] = useState("general");
+  const [availableModes, setAvailableModes] = useState(["general"]);
+  const [confidence, setConfidence] = useState(0.35);
   const lastFrameTime = useRef(Date.now());
+
+  // Fetch backend status on mount
+  useEffect(() => {
+    fetch(`${API_URL}/status`)
+      .then((r) => r.json())
+      .then((data) => {
+        setMode(data.mode);
+        setAvailableModes(data.available_modes);
+        setConfidence(data.conf_threshold);
+      })
+      .catch(() => {});
+  }, []);
+
+  const switchMode = async (newMode) => {
+    try {
+      const res = await fetch(`${API_URL}/mode/${newMode}`, { method: "POST" });
+      const data = await res.json();
+      if (data.success) setMode(data.mode);
+    } catch {}
+  };
+
+  const updateConfidence = async (val) => {
+    setConfidence(val);
+    try {
+      await fetch(`${API_URL}/confidence/${val}`, { method: "POST" });
+    } catch {}
+  };
 
   const startCamera = useCallback(async () => {
     try {
@@ -32,7 +63,6 @@ function App() {
     }
   }, []);
 
-  // Attach stream to video element once it's mounted
   useEffect(() => {
     if (streaming && videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
@@ -66,6 +96,7 @@ function App() {
       const data = JSON.parse(e.data);
       if (data.detections) {
         setDetections(data.detections);
+        if (data.mode) setMode(data.mode);
         const now = Date.now();
         setFps(Math.round(1000 / (now - lastFrameTime.current)));
         lastFrameTime.current = now;
@@ -135,7 +166,6 @@ function App() {
     }
   }, [detections]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       clearInterval(intervalRef.current);
@@ -146,7 +176,6 @@ function App() {
     };
   }, []);
 
-  // Group detections by label for sidebar summary
   const summary = detections.reduce((acc, d) => {
     acc[d.label] = acc[d.label] || { count: 0, color: d.color, maxConf: 0 };
     acc[d.label].count++;
@@ -162,7 +191,7 @@ function App() {
         </h1>
         <div className="status">
           <div className={`status-dot ${connected ? "connected" : ""}`} />
-          {connected ? "Backend connected" : "Backend disconnected"}
+          {connected ? `Connected - ${mode}` : "Backend disconnected"}
         </div>
       </header>
 
@@ -202,6 +231,31 @@ function App() {
           </div>
 
           <div className="sidebar-section">
+            <h3>Model</h3>
+            <div className="controls">
+              {availableModes.map((m) => (
+                <button
+                  key={m}
+                  className={mode === m ? "active" : ""}
+                  onClick={() => switchMode(m)}
+                >
+                  {m === "general" ? "General" : "Blood Cell"}
+                </button>
+              ))}
+            </div>
+            <div className="confidence-row">
+              <label>Confidence: {Math.round(confidence * 100)}%</label>
+              <input
+                type="range"
+                min="5"
+                max="95"
+                value={Math.round(confidence * 100)}
+                onChange={(e) => updateConfidence(e.target.value / 100)}
+              />
+            </div>
+          </div>
+
+          <div className="sidebar-section">
             <h3>Stats</h3>
             <div className="stats">
               <div className="stat-card">
@@ -235,12 +289,12 @@ function App() {
           </div>
 
           <div className="sidebar-section">
-            <h3>Detected Components</h3>
+            <h3>Detected {mode === "blood_cell" ? "Cells" : "Objects"}</h3>
             {Object.keys(summary).length === 0 ? (
               <p style={{ color: "#555", fontSize: 13 }}>
                 {detecting
                   ? "Analyzing..."
-                  : "Start detection to see components"}
+                  : "Start detection to see results"}
               </p>
             ) : (
               <ul className="detection-list">

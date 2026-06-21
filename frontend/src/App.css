@@ -130,6 +130,25 @@ header h1 span {
   color: #4fc3f7;
 }
 
+.confidence-row {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.confidence-row label {
+  font-size: 12px;
+  color: #888;
+}
+
+.confidence-row input[type="range"] {
+  width: 100%;
+  accent-color: #4fc3f7;
+  height: 4px;
+  cursor: pointer;
+}
+
 .detection-list {
   list-style: none;
   display: flex;

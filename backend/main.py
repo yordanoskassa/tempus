@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from detector import decode_frame, detect_components
+from detector import Detector, decode_frame
 
 app = FastAPI(title="VetrView - Cell Component Detection")
 
@@ -12,10 +12,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+detector = Detector()
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/status")
+def status():
+    return detector.get_status()
+
+
+@app.post("/mode/{mode}")
+def set_mode(mode: str):
+    ok = detector.set_mode(mode)
+    return {"success": ok, **detector.get_status()}
+
+
+@app.post("/confidence/{value}")
+def set_confidence(value: float):
+    detector.conf_threshold = max(0.05, min(0.95, value))
+    return {"conf_threshold": detector.conf_threshold}
 
 
 @app.websocket("/ws/detect")
@@ -30,8 +49,11 @@ async def detect_ws(websocket: WebSocket):
             data_url = await websocket.receive_text()
             try:
                 frame = decode_frame(data_url)
-                detections = detect_components(frame)
-                await websocket.send_json({"detections": detections})
+                detections = detector.detect(frame)
+                await websocket.send_json({
+                    "detections": detections,
+                    "mode": detector.mode,
+                })
             except Exception as e:
                 await websocket.send_json({"error": str(e), "detections": []})
     except WebSocketDisconnect:
