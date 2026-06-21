@@ -6,179 +6,125 @@ const WS_URL = "ws://localhost:8000/ws/detect";
 const API_URL = "http://localhost:8000";
 const FRAME_INTERVAL_MS = 100;
 
-// ─── Utility: animated value hook ───
-function useAnimatedValue(target, duration = 600) {
+function useAnimatedValue(target, duration = 500) {
   const [display, setDisplay] = useState(target);
   const rafRef = useRef(null);
-  const startRef = useRef({ value: target, time: 0 });
 
   useEffect(() => {
-    const startVal = display;
+    const start = display;
     const startTime = performance.now();
-    startRef.current = { value: startVal, time: startTime };
-
-    const animate = (now) => {
-      const elapsed = now - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
-      setDisplay(startVal + (target - startVal) * eased);
-      if (progress < 1) rafRef.current = requestAnimationFrame(animate);
+    const step = (now) => {
+      const t = Math.min((now - startTime) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setDisplay(start + (target - start) * eased);
+      if (t < 1) rafRef.current = requestAnimationFrame(step);
     };
-
-    rafRef.current = requestAnimationFrame(animate);
+    rafRef.current = requestAnimationFrame(step);
     return () => cancelAnimationFrame(rafRef.current);
   }, [target, duration]);
 
   return display;
 }
 
-// ─── Format elapsed time ───
-function formatTime(seconds) {
-  const m = Math.floor(seconds / 60)
-    .toString()
-    .padStart(2, "0");
-  const s = (seconds % 60).toString().padStart(2, "0");
-  return `${m}:${s}`;
+function formatTime(s) {
+  return `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 }
 
-// ─── Generate session ID ───
-function genSessionId() {
+function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-// ─── Sub-component: HeaderBar ───
-function HeaderBar({
-  backendConnected,
-  qnxConnected,
-  voiceActive,
-  sessionElapsed,
-  detecting,
-  operationMode,
-  setOperationMode,
-  flaggedForReview,
-}) {
+// ── Header ──
+
+function HeaderBar({ backendConnected, qnxConnected, voiceActive, sessionElapsed, detecting, operationMode, setOperationMode, flaggedForReview }) {
   return (
     <div className="header-bar">
       <div className="header-brand">
-        <h1>
-          Vetr<span>View</span>
-        </h1>
-        <span className="brand-tag">Lab Dashboard</span>
+        <h1>Vetr<span>View</span></h1>
+        <span className="brand-tag">Lab</span>
       </div>
-
       <div className="header-center">
-        <div className="conn-pills">
-          <div className={`conn-pill ${qnxConnected ? "conn-active" : ""}`}>
-            <div className="conn-dot" />
-            QNX
+        <div className="conn-row">
+          <div className={`conn-item ${qnxConnected ? "conn-active" : ""}`}>
+            <div className="conn-dot" />QNX
           </div>
-          <div className={`conn-pill ${backendConnected ? "conn-active" : ""}`}>
-            <div className="conn-dot" />
-            Backend
+          <div className={`conn-item ${backendConnected ? "conn-active" : ""}`}>
+            <div className="conn-dot" />Backend
           </div>
-          <div className={`conn-pill ${voiceActive ? "conn-active" : ""}`}>
-            <div className="conn-dot" />
-            Voice
+          <div className={`conn-item ${voiceActive ? "conn-active" : ""}`}>
+            <div className="conn-dot" />Voice
           </div>
         </div>
-
-        {detecting && (
-          <div className="session-timer mono">{formatTime(sessionElapsed)}</div>
-        )}
-
-        {flaggedForReview && (
-          <div className="flagged-banner">FLAGGED FOR REVIEW</div>
-        )}
+        {detecting && <div className="session-timer">{formatTime(sessionElapsed)}</div>}
+        {flaggedForReview && <div className="header-flag">Flagged</div>}
       </div>
-
       <div className="header-right">
         <div className="mode-toggle">
-          <button
-            className={operationMode === "auto" ? "mode-active" : ""}
-            onClick={() => setOperationMode("auto")}
-          >
-            Auto
-          </button>
-          <button
-            className={operationMode === "review" ? "mode-active" : ""}
-            onClick={() => setOperationMode("review")}
-          >
-            Review
-          </button>
+          <button className={operationMode === "auto" ? "mode-active" : ""} onClick={() => setOperationMode("auto")}>Auto</button>
+          <button className={operationMode === "review" ? "mode-active" : ""} onClick={() => setOperationMode("review")}>Review</button>
         </div>
       </div>
     </div>
   );
 }
 
-// ─── Sub-component: AbnormalGauge ───
+// ── Gauge ──
+
 function AbnormalGauge({ value, alertLevel }) {
-  const radius = 80;
-  const circumference = 2 * Math.PI * radius;
-  const clampedValue = Math.min(Math.max(value, 0), 100);
-  const strokeDashoffset = circumference - (clampedValue / 100) * circumference;
-  const animatedVal = useAnimatedValue(clampedValue);
+  const r = 76;
+  const circ = 2 * Math.PI * r;
+  const clamped = Math.min(Math.max(value, 0), 100);
+  const offset = circ - (clamped / 100) * circ;
+  const animated = useAnimatedValue(clamped);
 
   return (
     <div className="gauge-container">
-      <svg viewBox="0 0 200 200" className="gauge-svg">
-        <circle className="gauge-track" cx="100" cy="100" r={radius} />
-        <circle
-          className={`gauge-fill gauge-${alertLevel}`}
-          cx="100"
-          cy="100"
-          r={radius}
-          strokeDasharray={circumference}
-          strokeDashoffset={strokeDashoffset}
-        />
-      </svg>
-      <div className="gauge-value">
-        <span className="gauge-number mono">{animatedVal.toFixed(1)}</span>
-        <span className="gauge-unit">%</span>
-        <span className="gauge-label">Abnormal</span>
+      <div className="gauge-wrap">
+        <svg viewBox="0 0 180 180" className="gauge-svg">
+          <circle className="gauge-track" cx="90" cy="90" r={r} />
+          <circle className={`gauge-fill level-${alertLevel}`} cx="90" cy="90" r={r} strokeDasharray={circ} strokeDashoffset={offset} />
+        </svg>
+        <div className="gauge-center">
+          <span className="gauge-number">{animated.toFixed(1)}<span className="gauge-unit">%</span></span>
+          <span className="gauge-sub">Abnormal</span>
+        </div>
       </div>
-      <div className={`gauge-alert-badge badge-${alertLevel}`}>
-        {alertLevel === "normal"
-          ? "Normal"
-          : alertLevel === "warning"
-          ? "Warning"
-          : "Critical"}
+      <div className={`gauge-status level-${alertLevel}`}>
+        {alertLevel === "normal" ? "Normal" : alertLevel === "warning" ? "Warning" : "Critical"}
       </div>
     </div>
   );
 }
 
-// ─── Sub-component: LiveStatsGrid ───
-function LiveStatsGrid({ analytics, fps, detecting, totalDetections, mode }) {
-  const yoloCount = analytics?.cell_count ?? 0;
-  const shapeCount = analytics?.shape_count ?? 0;
+// ── Stats ──
 
+function LiveStatsGrid({ analytics, fps, detecting, totalDetections, mode }) {
   return (
     <div>
-      <div className="section-title">Live Statistics</div>
+      <div className="section-label">Statistics</div>
       <div className="stats-grid">
-        <div className="stat-card-v2">
-          <div className="stat-val mono">{totalDetections}</div>
+        <div className="stat-cell">
+          <div className="stat-val">{totalDetections}</div>
           <div className="stat-lbl">Total</div>
         </div>
-        <div className="stat-card-v2">
-          <div className="stat-val mono">{detecting ? fps : 0}</div>
+        <div className="stat-cell">
+          <div className="stat-val">{detecting ? fps : 0}</div>
           <div className="stat-lbl">FPS</div>
         </div>
-        <div className="stat-card-v2">
-          <div className="stat-val mono">{yoloCount}</div>
+        <div className="stat-cell">
+          <div className="stat-val">{analytics?.cell_count ?? 0}</div>
           <div className="stat-lbl">{mode === "blood_cell" ? "Cells" : "Objects"}</div>
         </div>
-        <div className="stat-card-v2">
-          <div className="stat-val mono">{shapeCount}</div>
+        <div className="stat-cell">
+          <div className="stat-val">{analytics?.shape_count ?? 0}</div>
           <div className="stat-lbl">Shapes</div>
         </div>
-        <div className="stat-card-v2">
-          <div className="stat-val mono">{analytics?.inference_ms ?? "—"}</div>
-          <div className="stat-lbl">Latency ms</div>
+        <div className="stat-cell">
+          <div className="stat-val">{analytics?.inference_ms ?? "-"}</div>
+          <div className="stat-lbl">Latency</div>
         </div>
-        <div className="stat-card-v2">
-          <div className="stat-val mono">{analytics?.coverage_pct ?? 0}%</div>
+        <div className="stat-cell">
+          <div className="stat-val">{analytics?.coverage_pct ?? 0}%</div>
           <div className="stat-lbl">Coverage</div>
         </div>
       </div>
@@ -186,44 +132,25 @@ function LiveStatsGrid({ analytics, fps, detecting, totalDetections, mode }) {
   );
 }
 
-// ─── Sub-component: MorphologyBars ───
-function MorphologyBars({ morphologyCounts, totalCells }) {
+// ── Morphology ──
+
+function MorphologyBars({ morphologyCounts }) {
   if (!morphologyCounts || Object.keys(morphologyCounts).length === 0) return null;
-
-  const morphColors = {
-    Normal: "#00e676",
-    Sickle: "#e63946",
-    Teardrop: "#f4a261",
-    Acanthocyte: "#ff6b6b",
-    "Burr/Echinocyte": "#e76f51",
-    Spherocyte: "#f4845f",
-    Elliptocyte: "#ffb703",
-    Target: "#fb8500",
-    "N/A": "#556b8a",
-  };
-
+  const colors = { Normal: "#34d399", Sickle: "#f87171", Teardrop: "#fbbf24", Acanthocyte: "#fb923c", "Burr/Echinocyte": "#f97316", Spherocyte: "#fb7185", Elliptocyte: "#e879f9", Target: "#a78bfa", "N/A": "#475569" };
   const sorted = Object.entries(morphologyCounts).sort((a, b) => b[1] - a[1]);
   const max = Math.max(...sorted.map(([, c]) => c), 1);
 
   return (
     <div>
-      <div className="section-title">Morphology</div>
-      <div className="morph-bars">
+      <div className="section-label">Morphology</div>
+      <div className="morph-section">
         {sorted.map(([label, count]) => (
-          <div key={label} className="morph-bar-item">
-            <div className="morph-bar-header">
-              <span className="morph-bar-label">{label}</span>
-              <span className="morph-bar-count">{count}</span>
+          <div key={label} className="morph-row">
+            <span className="morph-label">{label}</span>
+            <div className="morph-track">
+              <div className="morph-fill" style={{ width: `${(count / max) * 100}%`, background: colors[label] || "#38bdf8" }} />
             </div>
-            <div className="morph-bar-track">
-              <div
-                className="morph-bar-fill"
-                style={{
-                  width: `${(count / max) * 100}%`,
-                  background: morphColors[label] || "#00b4d8",
-                }}
-              />
-            </div>
+            <span className="morph-count">{count}</span>
           </div>
         ))}
       </div>
@@ -231,26 +158,18 @@ function MorphologyBars({ morphologyCounts, totalCells }) {
   );
 }
 
-// ─── Sub-component: ClassBreakdownChips ───
+// ── Class Chips ──
+
 function ClassBreakdownChips({ classCounts }) {
   if (!classCounts || Object.keys(classCounts).length === 0) return null;
-
-  const classColors = {
-    RBC: "#e63946",
-    WBC: "#00b4d8",
-    Platelet: "#f4a261",
-  };
-
+  const colors = { RBC: "#f87171", WBC: "#38bdf8", Platelet: "#fbbf24" };
   return (
     <div>
-      <div className="section-title">Class Breakdown</div>
+      <div className="section-label">Classification</div>
       <div className="class-chips">
         {Object.entries(classCounts).map(([cls, count]) => (
           <div key={cls} className="class-chip">
-            <div
-              className="chip-dot"
-              style={{ background: classColors[cls] || "#00b4d8" }}
-            />
+            <div className="chip-dot" style={{ background: colors[cls] || "#38bdf8" }} />
             <span>{cls}</span>
             <span className="chip-count">{count}</span>
           </div>
@@ -260,82 +179,52 @@ function ClassBreakdownChips({ classCounts }) {
   );
 }
 
-// ─── Sub-component: AssessmentSummary ───
-function AssessmentSummary({ analytics, alertLevel, detecting }) {
-  const assessment = useMemo(() => {
-    if (!analytics || !detecting) return null;
+// ── Assessment ──
 
+function AssessmentSummary({ analytics, alertLevel, detecting }) {
+  const text = useMemo(() => {
+    if (!analytics || !detecting) return null;
     const parts = [];
-    const cellCount = analytics.cell_count || 0;
+    const cells = analytics.cell_count || 0;
     const abnormal = analytics.abnormal_pct || 0;
     const morph = analytics.morphology_counts || {};
     const classes = analytics.class_counts || {};
 
-    if (cellCount > 0) {
-      parts.push(`Analyzing ${cellCount} cells in field of view.`);
-    }
-
-    const abnormalTypes = Object.entries(morph).filter(
-      ([k]) => k !== "Normal" && k !== "N/A"
-    );
-    if (abnormalTypes.length > 0) {
-      const desc = abnormalTypes.map(([k, v]) => `${v} ${k}`).join(", ");
-      parts.push(`Abnormal morphologies: ${desc}.`);
-    }
-
-    if (Object.keys(classes).length > 0) {
-      const desc = Object.entries(classes)
-        .map(([k, v]) => `${v} ${k}`)
-        .join(", ");
-      parts.push(`Classification: ${desc}.`);
-    }
-
-    if (abnormal > 30) {
-      parts.push("RECOMMENDATION: Immediate review by certified technician required.");
-    } else if (abnormal > 10) {
-      parts.push("RECOMMENDATION: Close monitoring advised.");
-    }
-
+    if (cells > 0) parts.push(`${cells} cells in field of view.`);
+    const abnormalTypes = Object.entries(morph).filter(([k]) => k !== "Normal" && k !== "N/A");
+    if (abnormalTypes.length > 0) parts.push(`Abnormal: ${abnormalTypes.map(([k, v]) => `${v} ${k}`).join(", ")}.`);
+    if (Object.keys(classes).length > 0) parts.push(`Types: ${Object.entries(classes).map(([k, v]) => `${v} ${k}`).join(", ")}.`);
+    if (abnormal > 30) parts.push("Immediate review by certified technician required.");
+    else if (abnormal > 10) parts.push("Close monitoring advised.");
     return parts.join(" ");
   }, [analytics, detecting]);
 
   return (
     <div>
-      <div className="section-title">Assessment</div>
-      <div className={`assessment-box assessment-${alertLevel}`}>
-        {assessment ? (
-          <p className="assessment-text">{assessment}</p>
-        ) : (
-          <p className="assessment-placeholder">
-            Start detection to generate assessment...
-          </p>
-        )}
+      <div className="section-label">Assessment</div>
+      <div className={`assessment-box level-${alertLevel}`}>
+        {text ? <p className="assessment-text">{text}</p> : <p className="assessment-empty">Start detection to generate assessment</p>}
       </div>
     </div>
   );
 }
 
-// ─── Sub-component: SessionLog ───
+// ── Session Log ──
+
 function SessionLog({ entries }) {
-  const scrollRef = useRef(null);
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [entries.length]);
-
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [entries.length]);
   return (
     <div>
-      <div className="section-title">Session Log</div>
+      <div className="section-label">Session Log</div>
       {entries.length === 0 ? (
         <div className="log-empty">No events yet</div>
       ) : (
-        <div className="session-log" ref={scrollRef}>
-          {entries.map((entry, i) => (
-            <div key={i} className={`log-entry log-${entry.type || "info"}`}>
-              <span className="log-time">{entry.time}</span>
-              <span className="log-message">{entry.message}</span>
+        <div className="session-log" ref={ref}>
+          {entries.map((e, i) => (
+            <div key={i} className={`log-entry log-${e.type || "info"}`}>
+              <span className="log-time">{e.time}</span>
+              <span className="log-message">{e.message}</span>
             </div>
           ))}
         </div>
@@ -344,44 +233,21 @@ function SessionLog({ entries }) {
   );
 }
 
-// ─── Sub-component: QuickActions ───
-function QuickActions({
-  flaggedForReview,
-  onFlag,
-  onSnapshot,
-  onReport,
-  reportGenerating,
-  detecting,
-  snapshotCount,
-}) {
+// ── Quick Actions ──
+
+function QuickActions({ flaggedForReview, onFlag, onSnapshot, onReport, reportGenerating, detecting, snapshotCount }) {
   return (
     <div>
-      <div className="section-title">Quick Actions</div>
+      <div className="section-label">Actions</div>
       <div className="quick-actions">
-        <button
-          className={`action-btn ${flaggedForReview ? "action-flagged" : ""}`}
-          onClick={onFlag}
-        >
-          <span className="action-icon">{flaggedForReview ? "\u2691" : "\u2690"}</span>
+        <button className={`action-btn ${flaggedForReview ? "action-flagged" : ""}`} onClick={onFlag}>
           {flaggedForReview ? "Unflag Review" : "Flag for Review"}
         </button>
-        <button
-          className="action-btn"
-          onClick={onSnapshot}
-          disabled={!detecting}
-        >
-          <span className="action-icon">{"\u2316"}</span>
+        <button className="action-btn" onClick={onSnapshot} disabled={!detecting}>
           Capture Snapshot
-          {snapshotCount > 0 && (
-            <span className="snapshot-badge">{snapshotCount}</span>
-          )}
+          {snapshotCount > 0 && <span className="action-meta">{snapshotCount}</span>}
         </button>
-        <button
-          className={`action-btn ${reportGenerating ? "action-generating" : ""}`}
-          onClick={onReport}
-          disabled={reportGenerating}
-        >
-          <span className="action-icon">{"\u2637"}</span>
+        <button className={`action-btn ${reportGenerating ? "action-generating" : ""}`} onClick={onReport} disabled={reportGenerating}>
           {reportGenerating ? "Generating..." : "Generate Report"}
         </button>
       </div>
@@ -389,67 +255,52 @@ function QuickActions({
   );
 }
 
-// ─── Sub-component: ReportPreview ───
+// ── Report Modal ──
+
 function ReportPreview({ reportData, onClose }) {
   if (!reportData) return null;
   return (
     <div className="report-overlay" onClick={onClose}>
       <div className="report-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="report-modal-header">
-          <h2>Report: {reportData.report_id || "—"}</h2>
-          <button className="report-close-btn" onClick={onClose}>
-            {"\u00d7"}
-          </button>
+        <div className="report-header">
+          <h2>{reportData.report_id || "Report"}</h2>
+          <button className="report-close" onClick={onClose}>{"\u00d7"}</button>
         </div>
         <div className="report-body">
-          <pre className="report-json">
-            {JSON.stringify(reportData, null, 2)}
-          </pre>
+          <pre className="report-json">{JSON.stringify(reportData, null, 2)}</pre>
         </div>
       </div>
     </div>
   );
 }
 
-// ─── Sub-component: DetectionList ───
+// ── Detection List ──
+
 function DetectionList({ summary, detecting }) {
   if (Object.keys(summary).length === 0) {
-    return (
-      <p style={{ color: "var(--text-muted)", fontSize: 12 }}>
-        {detecting ? "Analyzing..." : "Nothing detected yet"}
-      </p>
-    );
+    return <p style={{ color: "var(--text-3)", fontSize: 12 }}>{detecting ? "Analyzing..." : "No detections"}</p>;
   }
   return (
     <ul className="detection-list">
       {Object.entries(summary).map(([label, info]) => (
         <li key={label} className="detection-item">
           <div className="detection-label">
-            <div
-              className="detection-color"
-              style={{
-                background: `rgb(${info.color[0]}, ${info.color[1]}, ${info.color[2]})`,
-              }}
-            />
+            <div className="detection-color" style={{ background: `rgb(${info.color[0]},${info.color[1]},${info.color[2]})` }} />
             {label}
-            {info.count > 1 && (
-              <span style={{ color: "var(--text-muted)" }}> x{info.count}</span>
-            )}
+            {info.count > 1 && <span style={{ color: "var(--text-3)" }}> x{info.count}</span>}
           </div>
-          <span className="detection-confidence">
-            {Math.round(info.maxConf * 100)}%
-          </span>
+          <span className="detection-confidence">{Math.round(info.maxConf * 100)}%</span>
         </li>
       ))}
     </ul>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ─── Main App Component ───
-// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════
+// ── App ──
+// ═══════════════════════════════════════════
+
 function App() {
-  // ─── Refs (preserved) ───
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const captureCanvasRef = useRef(null);
@@ -458,7 +309,6 @@ function App() {
   const streamRef = useRef(null);
   const lastFrameTime = useRef(Date.now());
 
-  // ─── Original state (preserved) ───
   const [streaming, setStreaming] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -470,11 +320,9 @@ function App() {
   const [confidence, setConfidence] = useState(0.35);
   const [shapesEnabled, setShapesEnabled] = useState(true);
 
-  // ─── New dashboard state ───
-  const [sessionStartTime, setSessionStartTime] = useState(null);
   const [sessionElapsed, setSessionElapsed] = useState(0);
   const [sessionLog, setSessionLog] = useState([]);
-  const [sessionId] = useState(genSessionId);
+  const [sessionId] = useState(genId);
   const [operationMode, setOperationMode] = useState("auto");
   const [alertLevel, setAlertLevel] = useState("normal");
   const [reportData, setReportData] = useState(null);
@@ -484,154 +332,111 @@ function App() {
   const [backendConnected, setBackendConnected] = useState(false);
   const [qnxConnected, setQnxConnected] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
-  const [voiceStatus, setVoiceStatus] = useState("idle");
+  const [, setVoiceStatus] = useState("idle");
   const [showReportPreview, setShowReportPreview] = useState(false);
 
-  // ─── Log helper ───
-  const addLogEntry = useCallback((message, type = "info") => {
-    const now = new Date();
-    const time = now.toLocaleTimeString("en-US", {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
+  const addLog = useCallback((message, type = "info") => {
+    const time = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     setSessionLog((prev) => [...prev.slice(-200), { time, message, type }]);
   }, []);
 
-  // ─── Fetch initial status (preserved) ───
+  // Initial status fetch
   useEffect(() => {
-    fetch(`${API_URL}/status`)
-      .then((r) => r.json())
-      .then((data) => {
-        setMode(data.mode);
-        setAvailableModes(data.available_modes);
-        setConfidence(data.conf_threshold);
-        setShapesEnabled(data.shapes_enabled);
-      })
-      .catch(() => {});
+    fetch(`${API_URL}/status`).then((r) => r.json()).then((d) => {
+      setMode(d.mode);
+      setAvailableModes(d.available_modes);
+      setConfidence(d.conf_threshold);
+      setShapesEnabled(d.shapes_enabled);
+    }).catch(() => {});
   }, []);
 
-  // ─── Backend health poll (5s) ───
+  // Health poll
   useEffect(() => {
     const poll = () => {
-      fetch(`${API_URL}/health`)
-        .then((r) => r.json())
-        .then((data) => {
-          setBackendConnected(data.status === "ok");
-          setQnxConnected(data.qnx_camera_connected === true);
-        })
-        .catch(() => {
-          setBackendConnected(false);
-          setQnxConnected(false);
-        });
+      fetch(`${API_URL}/health`).then((r) => r.json()).then((d) => {
+        setBackendConnected(d.status === "ok");
+        setQnxConnected(d.qnx_camera_connected === true);
+      }).catch(() => { setBackendConnected(false); setQnxConnected(false); });
     };
     poll();
     const id = setInterval(poll, 5000);
     return () => clearInterval(id);
   }, []);
 
-  // ─── Session timer ───
+  // Session timer
   useEffect(() => {
     if (!detecting) return;
-    setSessionStartTime(Date.now());
     setSessionElapsed(0);
-    const id = setInterval(() => {
-      setSessionElapsed((prev) => prev + 1);
-    }, 1000);
+    const id = setInterval(() => setSessionElapsed((p) => p + 1), 1000);
     return () => clearInterval(id);
   }, [detecting]);
 
-  // ─── Alert level computation ───
+  // Alert level
   useEffect(() => {
     if (!analytics) return;
-    const abnormal = analytics.abnormal_pct || 0;
-    let newLevel;
-    if (abnormal > 30) newLevel = "critical";
-    else if (abnormal > 10) newLevel = "warning";
-    else newLevel = "normal";
+    const pct = analytics.abnormal_pct || 0;
+    const level = pct > 30 ? "critical" : pct > 10 ? "warning" : "normal";
     setAlertLevel((prev) => {
-      if (prev !== newLevel) {
-        if (newLevel === "critical") {
-          addLogEntry(`ALERT: Abnormality ${abnormal}% exceeds critical threshold`, "alert");
-        } else if (newLevel === "warning" && prev !== "critical") {
-          addLogEntry(`Warning: Abnormality ${abnormal}% exceeds warning threshold`, "alert");
-        }
+      if (prev !== level) {
+        if (level === "critical") addLog(`Alert: ${pct}% abnormal, critical threshold exceeded`, "alert");
+        else if (level === "warning" && prev !== "critical") addLog(`Warning: ${pct}% abnormal`, "alert");
       }
-      return newLevel;
+      return level;
     });
-  }, [analytics, addLogEntry]);
+  }, [analytics, addLog]);
 
-  // ─── Auto-flag when critical + auto mode ───
+  // Auto-flag
   useEffect(() => {
     if (operationMode === "auto" && alertLevel === "critical" && !flaggedForReview) {
       setFlaggedForReview(true);
-      addLogEntry("Auto-flagged for review (critical threshold exceeded)", "alert");
+      addLog("Auto-flagged for review", "alert");
     }
-  }, [operationMode, alertLevel, flaggedForReview, addLogEntry]);
+  }, [operationMode, alertLevel, flaggedForReview, addLog]);
 
-  // ─── Preserved: mode switching ───
-  const switchMode = async (newMode) => {
+  const switchMode = async (m) => {
     try {
-      const res = await fetch(`${API_URL}/mode/${newMode}`, { method: "POST" });
-      const data = await res.json();
-      if (data.success) {
-        setMode(data.mode);
-        addLogEntry(`Switched to ${data.mode} mode`, "action");
-      }
+      const res = await fetch(`${API_URL}/mode/${m}`, { method: "POST" });
+      const d = await res.json();
+      if (d.success) { setMode(d.mode); addLog(`Mode: ${d.mode}`, "action"); }
     } catch {}
   };
 
-  // ─── Preserved: confidence ───
   const updateConfidence = async (val) => {
     setConfidence(val);
-    try {
-      await fetch(`${API_URL}/confidence/${val}`, { method: "POST" });
-    } catch {}
+    try { await fetch(`${API_URL}/confidence/${val}`, { method: "POST" }); } catch {}
   };
 
-  // ─── Preserved: shape toggle ───
   const toggleShapes = async () => {
     const next = !shapesEnabled;
     setShapesEnabled(next);
-    try {
-      await fetch(`${API_URL}/shapes/${next}`, { method: "POST" });
-    } catch {}
+    try { await fetch(`${API_URL}/shapes/${next}`, { method: "POST" }); } catch {}
   };
 
-  // ─── Preserved: camera ───
   const startCamera = useCallback(() => {
     setStreaming(true);
-    addLogEntry("Camera feed started", "action");
-  }, [addLogEntry]);
+    addLog("Camera started", "action");
+  }, [addLog]);
 
   const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
+    if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
     clearInterval(intervalRef.current);
     setStreaming(false);
     setDetecting(false);
     setDetections([]);
-    addLogEntry("Camera feed stopped", "action");
-  }, [addLogEntry]);
+    addLog("Camera stopped", "action");
+  }, [addLog]);
 
-  // ─── Preserved: WebSocket ───
   const connectWs = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     const ws = new WebSocket(WS_URL);
     ws.onopen = () => setConnected(true);
-    ws.onclose = () => {
-      setConnected(false);
-      setDetecting(false);
-    };
+    ws.onclose = () => { setConnected(false); setDetecting(false); };
     ws.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      if (data.detections) {
-        setDetections(data.detections);
-        if (data.mode) setMode(data.mode);
-        if (data.analytics) setAnalytics(data.analytics);
+      const d = JSON.parse(e.data);
+      if (d.detections) {
+        setDetections(d.detections);
+        if (d.mode) setMode(d.mode);
+        if (d.analytics) setAnalytics(d.analytics);
         const now = Date.now();
         setFps(Math.round(1000 / (now - lastFrameTime.current)));
         lastFrameTime.current = now;
@@ -640,36 +445,30 @@ function App() {
     wsRef.current = ws;
   }, []);
 
-  // ─── Preserved: detection toggle ───
   const toggleDetection = useCallback(() => {
     if (detecting) {
       clearInterval(intervalRef.current);
       setDetecting(false);
       setDetections([]);
-      addLogEntry("Detection stopped", "action");
+      addLog("Detection stopped", "action");
       return;
     }
     if (!streaming) return;
     connectWs();
-
-    const sendFrame = () => {
-      const video = videoRef.current;
+    intervalRef.current = setInterval(() => {
       const ws = wsRef.current;
-      if (!video || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send("qnx");
-    };
-
-    intervalRef.current = setInterval(sendFrame, FRAME_INTERVAL_MS);
+    }, FRAME_INTERVAL_MS);
     setDetecting(true);
-    addLogEntry("Detection started", "action");
-  }, [detecting, streaming, connectWs, addLogEntry]);
+    addLog("Detection started", "action");
+  }, [detecting, streaming, connectWs, addLog]);
 
-  // ─── Preserved: draw overlays ───
+  // Draw overlays
   useEffect(() => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
     if (!canvas || !video) return;
-
     canvas.width = video.naturalWidth || 2304;
     canvas.height = video.naturalHeight || 1296;
     const ctx = canvas.getContext("2d");
@@ -678,14 +477,8 @@ function App() {
     for (const det of detections) {
       const [x, y, w, h] = det.bbox;
       const [r, g, b] = det.color;
-      const color = `rgb(${r}, ${g}, ${b})`;
-
-      if (det.type === "shape") {
-        ctx.setLineDash([4, 4]);
-      } else {
-        ctx.setLineDash([]);
-      }
-
+      const color = `rgb(${r},${g},${b})`;
+      ctx.setLineDash(det.type === "shape" ? [4, 4] : []);
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, w, h);
@@ -693,286 +486,165 @@ function App() {
 
       const label = `${det.label} ${Math.round(det.confidence * 100)}%`;
       ctx.font = "bold 11px sans-serif";
-      const textWidth = ctx.measureText(label).width;
+      const tw = ctx.measureText(label).width;
       ctx.fillStyle = color;
-      ctx.fillRect(x, y - 18, textWidth + 8, 18);
+      ctx.fillRect(x, y - 18, tw + 8, 18);
       ctx.fillStyle = "#000";
       ctx.fillText(label, x + 4, y - 5);
 
       if (det.morphology && det.morphology !== "Normal") {
         const mc = det.morph_color || [255, 255, 255];
-        const morphColor = `rgb(${mc[0]}, ${mc[1]}, ${mc[2]})`;
-        const morphLabel = det.morphology;
-        const morphWidth = ctx.measureText(morphLabel).width;
-        ctx.fillStyle = morphColor;
-        ctx.fillRect(x, y + h, morphWidth + 8, 16);
+        ctx.fillStyle = `rgb(${mc[0]},${mc[1]},${mc[2]})`;
+        const ml = det.morphology;
+        const mw = ctx.measureText(ml).width;
+        ctx.fillRect(x, y + h, mw + 8, 16);
         ctx.fillStyle = "#000";
         ctx.font = "bold 10px sans-serif";
-        ctx.fillText(morphLabel, x + 4, y + h + 12);
+        ctx.fillText(ml, x + 4, y + h + 12);
       }
     }
   }, [detections]);
 
-  // ─── Cleanup on unmount ───
   useEffect(() => {
-    return () => {
-      clearInterval(intervalRef.current);
-      wsRef.current?.close();
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-    };
+    return () => { clearInterval(intervalRef.current); wsRef.current?.close(); if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop()); };
   }, []);
 
-  // ─── Generate report ───
   const generateReport = useCallback(async () => {
     setReportGenerating(true);
-    addLogEntry("Generating report...", "action");
+    addLog("Generating report...", "action");
     try {
       const res = await fetch(`${API_URL}/report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          session_duration: sessionElapsed,
-          snapshots_count: snapshots.length,
-          operation_mode: operationMode,
-          flagged_for_review: flaggedForReview,
-          log_entries: sessionLog.slice(-50),
-        }),
+        body: JSON.stringify({ session_id: sessionId, session_duration: sessionElapsed, snapshots_count: snapshots.length, operation_mode: operationMode, flagged_for_review: flaggedForReview, log_entries: sessionLog.slice(-50) }),
       });
-      const data = await res.json();
-      setReportData(data);
+      const d = await res.json();
+      setReportData(d);
       setShowReportPreview(true);
-      addLogEntry(`Report generated: ${data.report_id}`, "success");
+      addLog(`Report: ${d.report_id}`, "success");
     } catch (err) {
-      addLogEntry(`Report generation failed: ${err.message}`, "alert");
+      addLog(`Report failed: ${err.message}`, "alert");
     } finally {
       setReportGenerating(false);
     }
-  }, [sessionId, sessionElapsed, snapshots, operationMode, flaggedForReview, sessionLog, addLogEntry]);
+  }, [sessionId, sessionElapsed, snapshots, operationMode, flaggedForReview, sessionLog, addLog]);
 
-  // ─── Capture snapshot ───
   const captureSnapshot = useCallback(() => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
     if (!canvas || !video) return;
-
-    const capture = captureCanvasRef.current;
-    capture.width = video.naturalWidth || 2304;
-    capture.height = video.naturalHeight || 1296;
-    const ctx = capture.getContext("2d");
+    const c = captureCanvasRef.current;
+    c.width = video.naturalWidth || 2304;
+    c.height = video.naturalHeight || 1296;
+    const ctx = c.getContext("2d");
     ctx.drawImage(video, 0, 0);
     ctx.drawImage(canvas, 0, 0);
+    setSnapshots((prev) => [...prev, { dataUrl: c.toDataURL("image/png"), timestamp: new Date().toISOString() }]);
+    addLog(`Snapshot #${snapshots.length + 1}`, "success");
+  }, [snapshots.length, addLog]);
 
-    const dataUrl = capture.toDataURL("image/png");
-    const timestamp = new Date().toISOString();
-    setSnapshots((prev) => [...prev, { dataUrl, timestamp }]);
-    addLogEntry(`Snapshot captured (#${snapshots.length + 1})`, "success");
-  }, [snapshots.length, addLogEntry]);
-
-  // ─── Flag toggle ───
   const toggleFlag = useCallback(() => {
     setFlaggedForReview((prev) => {
-      const next = !prev;
-      addLogEntry(
-        next ? "Session flagged for review" : "Review flag removed",
-        next ? "alert" : "action"
-      );
-      return next;
+      addLog(prev ? "Review flag removed" : "Flagged for review", prev ? "action" : "alert");
+      return !prev;
     });
-  }, [addLogEntry]);
+  }, [addLog]);
 
-  // ─── Detection summaries (preserved logic) ───
   const yoloDets = detections.filter((d) => d.type === "yolo");
   const shapeDets = detections.filter((d) => d.type === "shape");
-
-  const groupBy = (arr) =>
-    arr.reduce((acc, d) => {
-      acc[d.label] = acc[d.label] || { count: 0, color: d.color, maxConf: 0 };
-      acc[d.label].count++;
-      acc[d.label].maxConf = Math.max(acc[d.label].maxConf, d.confidence);
-      return acc;
-    }, {});
-
+  const groupBy = (arr) => arr.reduce((a, d) => { a[d.label] = a[d.label] || { count: 0, color: d.color, maxConf: 0 }; a[d.label].count++; a[d.label].maxConf = Math.max(a[d.label].maxConf, d.confidence); return a; }, {});
   const yoloSummary = groupBy(yoloDets);
   const shapeSummary = groupBy(shapeDets);
-  const totalDetections = detections.length;
 
-  // ─── Render ───
   return (
     <div className="dashboard">
-      <HeaderBar
-        backendConnected={backendConnected}
-        qnxConnected={qnxConnected}
-        voiceActive={voiceActive}
-        sessionElapsed={sessionElapsed}
-        detecting={detecting}
-        operationMode={operationMode}
-        setOperationMode={setOperationMode}
-        flaggedForReview={flaggedForReview}
-      />
+      <HeaderBar backendConnected={backendConnected} qnxConnected={qnxConnected} voiceActive={voiceActive} sessionElapsed={sessionElapsed} detecting={detecting} operationMode={operationMode} setOperationMode={setOperationMode} flaggedForReview={flaggedForReview} />
 
       <div className="dashboard-body">
-        {/* ─── LEFT PANEL: Camera + Controls ─── */}
-        <div className="panel-left panel-glass">
+        {/* LEFT */}
+        <div className="panel-left">
           <div className="camera-section">
             {streaming ? (
               <div className="video-container">
-                <img
-                  ref={videoRef}
-                  src={`${API_URL}/qnx/stream`}
-                  alt="QNX Camera Module 3"
-                />
+                <img ref={videoRef} src={`${API_URL}/qnx/stream`} alt="QNX Camera" />
                 <canvas ref={canvasRef} />
               </div>
             ) : (
               <div className="no-camera">
-                <div className="no-camera-icon">{"\u23FA"}</div>
                 <p>No camera feed</p>
                 <button onClick={startCamera}>Start Camera</button>
               </div>
             )}
           </div>
 
-          <div className="camera-controls">
-            <div className="section-title">Controls</div>
-            <div className="control-buttons">
-              <button
-                className={`ctrl-btn ${streaming ? "ctrl-active" : ""}`}
-                onClick={streaming ? stopCamera : startCamera}
-              >
+          <div className="ctrl-section">
+            <div className="section-label">Controls</div>
+            <div className="ctrl-row">
+              <button className={`ctrl-btn ${streaming ? "ctrl-active" : ""}`} onClick={streaming ? stopCamera : startCamera}>
                 {streaming ? "Stop Camera" : "Start Camera"}
               </button>
-              <button
-                className={`ctrl-btn ${detecting ? "ctrl-active" : ""}`}
-                onClick={toggleDetection}
-                disabled={!streaming}
-              >
-                {detecting ? "Stop Detection" : "Detect"}
+              <button className={`ctrl-btn ${detecting ? "ctrl-active" : ""}`} onClick={toggleDetection} disabled={!streaming}>
+                {detecting ? "Stop" : "Detect"}
               </button>
             </div>
           </div>
 
-          <div className="model-section">
-            <div className="section-title">Model</div>
-            <div className="model-buttons">
+          <div className="ctrl-section">
+            <div className="section-label">Model</div>
+            <div className="ctrl-row" style={{ marginBottom: 10 }}>
               {availableModes.map((m) => (
-                <button
-                  key={m}
-                  className={`ctrl-btn ${mode === m ? "ctrl-active" : ""}`}
-                  onClick={() => switchMode(m)}
-                >
+                <button key={m} className={`ctrl-btn ${mode === m ? "ctrl-active" : ""}`} onClick={() => switchMode(m)}>
                   {m === "general" ? "General" : "Blood Cell"}
                 </button>
               ))}
             </div>
             <div className="confidence-row">
-              <label className="mono">
-                Confidence: {Math.round(confidence * 100)}%
-              </label>
-              <input
-                type="range"
-                min="5"
-                max="95"
-                value={Math.round(confidence * 100)}
-                onChange={(e) => updateConfidence(e.target.value / 100)}
-              />
+              <label>Confidence {Math.round(confidence * 100)}%</label>
+              <input type="range" min="5" max="95" value={Math.round(confidence * 100)} onChange={(e) => updateConfidence(e.target.value / 100)} />
             </div>
             <div className="toggle-row">
-              <label>Shape Detection</label>
-              <button
-                className={`toggle-btn ${shapesEnabled ? "active" : ""}`}
-                onClick={toggleShapes}
-              >
-                {shapesEnabled ? "ON" : "OFF"}
-              </button>
+              <label>Shapes</label>
+              <button className={`toggle-btn ${shapesEnabled ? "active" : ""}`} onClick={toggleShapes}>{shapesEnabled ? "On" : "Off"}</button>
             </div>
           </div>
 
-          {/* Detection Lists */}
-          <div className="camera-controls">
-            <div className="section-title">
-              {mode === "blood_cell" ? "Blood Cells" : "Objects"}
-            </div>
+          <div className="ctrl-section">
+            <div className="section-label">{mode === "blood_cell" ? "Cells" : "Objects"}</div>
             <DetectionList summary={yoloSummary} detecting={detecting} />
           </div>
 
           {shapesEnabled && Object.keys(shapeSummary).length > 0 && (
-            <div className="camera-controls">
-              <div className="section-title">Shapes</div>
+            <div className="ctrl-section">
+              <div className="section-label">Shapes</div>
               <DetectionList summary={shapeSummary} detecting={detecting} />
             </div>
           )}
         </div>
 
-        {/* ─── CENTER PANEL: Analytics ─── */}
-        <div className="panel-center panel-glass">
-          <AbnormalGauge
-            value={analytics?.abnormal_pct ?? 0}
-            alertLevel={alertLevel}
-          />
-
-          <LiveStatsGrid
-            analytics={analytics}
-            fps={fps}
-            detecting={detecting}
-            totalDetections={totalDetections}
-            mode={mode}
-          />
-
-          {mode === "blood_cell" && (
-            <MorphologyBars
-              morphologyCounts={analytics?.morphology_counts}
-              totalCells={analytics?.cell_count || 0}
-            />
-          )}
-
+        {/* CENTER */}
+        <div className="panel-center">
+          <AbnormalGauge value={analytics?.abnormal_pct ?? 0} alertLevel={alertLevel} />
+          <LiveStatsGrid analytics={analytics} fps={fps} detecting={detecting} totalDetections={detections.length} mode={mode} />
+          {mode === "blood_cell" && <MorphologyBars morphologyCounts={analytics?.morphology_counts} />}
           <ClassBreakdownChips classCounts={analytics?.class_counts} />
-
-          <AssessmentSummary
-            analytics={analytics}
-            alertLevel={alertLevel}
-            detecting={detecting}
-          />
+          <AssessmentSummary analytics={analytics} alertLevel={alertLevel} detecting={detecting} />
         </div>
 
-        {/* ─── RIGHT PANEL: Voice + Log + Actions ─── */}
-        <div className="panel-right panel-glass">
+        {/* RIGHT */}
+        <div className="panel-right">
           <div className="panel-section">
-            <VoiceAgent
-              expanded
-              onStatusChange={setVoiceStatus}
-              onActiveChange={setVoiceActive}
-            />
+            <VoiceAgent expanded onStatusChange={setVoiceStatus} onActiveChange={setVoiceActive} />
           </div>
-
           <div className="panel-section">
             <SessionLog entries={sessionLog} />
           </div>
-
           <div className="panel-section">
-            <QuickActions
-              flaggedForReview={flaggedForReview}
-              onFlag={toggleFlag}
-              onSnapshot={captureSnapshot}
-              onReport={generateReport}
-              reportGenerating={reportGenerating}
-              detecting={detecting}
-              snapshotCount={snapshots.length}
-            />
+            <QuickActions flaggedForReview={flaggedForReview} onFlag={toggleFlag} onSnapshot={captureSnapshot} onReport={generateReport} reportGenerating={reportGenerating} detecting={detecting} snapshotCount={snapshots.length} />
           </div>
         </div>
       </div>
 
-      {/* Report Preview Modal */}
-      {showReportPreview && (
-        <ReportPreview
-          reportData={reportData}
-          onClose={() => setShowReportPreview(false)}
-        />
-      )}
-
+      {showReportPreview && <ReportPreview reportData={reportData} onClose={() => setShowReportPreview(false)} />}
       <canvas ref={captureCanvasRef} style={{ display: "none" }} />
     </div>
   );
