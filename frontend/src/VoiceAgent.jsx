@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 
 const VOICE_WS_URL = "ws://localhost:8000/ws/voice";
 
-export default function VoiceAgent() {
+export default function VoiceAgent({ onStatusChange, onActiveChange, expanded }) {
   const [active, setActive] = useState(false);
   const [status, setStatus] = useState("idle"); // idle | connecting | listening | agent_speaking
   const [transcript, setTranscript] = useState([]);
@@ -14,6 +14,15 @@ export default function VoiceAgent() {
   const audioCtxRef = useRef(null);
   const playbackCtxRef = useRef(null);
   const nextPlayTimeRef = useRef(0);
+
+  // Notify parent of status changes
+  useEffect(() => {
+    if (onStatusChange) onStatusChange(status);
+  }, [status, onStatusChange]);
+
+  useEffect(() => {
+    if (onActiveChange) onActiveChange(active);
+  }, [active, onActiveChange]);
 
   const cleanup = useCallback(() => {
     if (processorRef.current) {
@@ -193,7 +202,7 @@ export default function VoiceAgent() {
       : "";
 
   return (
-    <div className="voice-panel">
+    <div className={`voice-panel ${expanded ? "voice-expanded" : ""}`}>
       <h3>Voice Assistant</h3>
 
       {error && <div className="voice-error">{error}</div>}
@@ -210,6 +219,19 @@ export default function VoiceAgent() {
           {statusLabel}
         </div>
       </div>
+
+      {/* Waveform animation bars when expanded and active */}
+      {expanded && active && (
+        <div className="voice-waveform">
+          {Array.from({ length: 12 }).map((_, i) => (
+            <div
+              key={i}
+              className={`waveform-bar ${status === "listening" ? "waveform-listening" : ""} ${status === "agent_speaking" ? "waveform-speaking" : ""}`}
+              style={{ animationDelay: `${i * 0.08}s` }}
+            />
+          ))}
+        </div>
+      )}
 
       {transcript.length > 0 && (
         <div className="voice-transcript">
