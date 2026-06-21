@@ -149,6 +149,35 @@ header h1 span {
   cursor: pointer;
 }
 
+.toggle-row {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.toggle-row label {
+  font-size: 12px;
+  color: #888;
+}
+
+.toggle-btn {
+  padding: 4px 12px;
+  border: 1px solid #2a2a3e;
+  border-radius: 4px;
+  background: #14141e;
+  color: #888;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.toggle-btn.active {
+  background: #1a3a4a;
+  border-color: #4fc3f7;
+  color: #4fc3f7;
+}
+
 .detection-list {
   list-style: none;
   display: flex;

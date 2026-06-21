@@ -37,6 +37,12 @@ def set_confidence(value: float):
     return {"conf_threshold": detector.conf_threshold}
 
 
+@app.post("/shapes/{enabled}")
+def toggle_shapes(enabled: str):
+    detector.shapes_enabled = enabled.lower() in ("true", "1", "on")
+    return {"shapes_enabled": detector.shapes_enabled}
+
+
 @app.websocket("/ws/detect")
 async def detect_ws(websocket: WebSocket):
     """WebSocket endpoint for real-time frame detection.
