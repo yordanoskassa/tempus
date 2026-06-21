@@ -10,6 +10,7 @@ function App() {
   const captureCanvasRef = useRef(null);
   const wsRef = useRef(null);
   const intervalRef = useRef(null);
+  const streamRef = useRef(null);
 
   const [streaming, setStreaming] = useState(false);
   const [detecting, setDetecting] = useState(false);
@@ -24,20 +25,29 @@ function App() {
         video: { width: 640, height: 480 },
         audio: false,
       });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setStreaming(true);
-      }
+      streamRef.current = stream;
+      setStreaming(true);
     } catch (err) {
       console.error("Camera access denied:", err);
     }
   }, []);
 
+  // Attach stream to video element once it's mounted
+  useEffect(() => {
+    if (streaming && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [streaming]);
+
   const stopCamera = useCallback(() => {
-    if (videoRef.current?.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    clearInterval(intervalRef.current);
     setStreaming(false);
     setDetecting(false);
     setDetections([]);
@@ -79,6 +89,7 @@ function App() {
       const video = videoRef.current;
       const ws = wsRef.current;
       if (!video || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!video.videoWidth || !video.videoHeight) return;
 
       const canvas = captureCanvasRef.current;
       canvas.width = video.videoWidth;
@@ -109,19 +120,16 @@ function App() {
       const [r, g, b] = det.color;
       const color = `rgb(${r}, ${g}, ${b})`;
 
-      // Bounding box
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, w, h);
 
-      // Label background
       const label = `${det.label} ${Math.round(det.confidence * 100)}%`;
       ctx.font = "bold 11px sans-serif";
       const textWidth = ctx.measureText(label).width;
       ctx.fillStyle = color;
       ctx.fillRect(x, y - 18, textWidth + 8, 18);
 
-      // Label text
       ctx.fillStyle = "#000";
       ctx.fillText(label, x + 4, y - 5);
     }
@@ -132,6 +140,9 @@ function App() {
     return () => {
       clearInterval(intervalRef.current);
       wsRef.current?.close();
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
     };
   }, []);
 
@@ -258,7 +269,6 @@ function App() {
         </div>
       </div>
 
-      {/* Hidden canvas for frame capture */}
       <canvas ref={captureCanvasRef} style={{ display: "none" }} />
     </div>
   );
