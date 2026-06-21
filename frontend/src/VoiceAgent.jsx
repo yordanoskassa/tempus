@@ -3,7 +3,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 const VOICE_WS_URL = "ws://localhost:8000/ws/voice";
 const API_URL = "http://localhost:8000";
 
-export default function VoiceAgent({ onStatusChange, onActiveChange, expanded }) {
+export default function VoiceAgent({ onStatusChange, onActiveChange, onCaptureResult, expanded }) {
   const [active, setActive] = useState(false);
   const [status, setStatus] = useState("idle"); // idle | checking | connecting | listening | agent_speaking
   const [transcript, setTranscript] = useState([]);
@@ -179,7 +179,9 @@ export default function VoiceAgent({ onStatusChange, onActiveChange, expanded })
             return;
           }
 
-          if (msg.type === "ConversationText") {
+          if (msg.type === "capture_result") {
+            if (onCaptureResult) onCaptureResult(msg);
+          } else if (msg.type === "ConversationText") {
             setTranscript((prev) => [
               ...prev,
               { role: msg.role, text: msg.content },
