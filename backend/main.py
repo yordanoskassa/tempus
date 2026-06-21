@@ -152,10 +152,12 @@ def _pi_camera_reader():
                 if frame is None:
                     continue
 
-                # Skip initial dark frames while auto-exposure settles
+                # Skip initial frames while auto-exposure settles
+                # During warm-up, R and B channels are near zero (green tint)
                 if not warmup_done:
-                    brightness = frame.mean()
-                    if brightness < 30:
+                    b_mean = frame[:, :, 0].mean()
+                    r_mean = frame[:, :, 2].mean()
+                    if r_mean < 20 and b_mean < 20:
                         continue
                     warmup_done = True
                     print("[camera] Auto-exposure settled, streaming frames")
