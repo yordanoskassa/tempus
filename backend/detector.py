@@ -27,6 +27,17 @@ SHAPE_COLORS = {
     "Irregular": [160, 160, 160],
 }
 
+# Diagnostically relevant cell shape labels for blood_cell mode
+CELL_SHAPE_COLORS = {
+    "Cell Cluster": [255, 140, 0],
+    "Large Cell": [100, 200, 255],
+    "Small Cell": [200, 100, 255],
+    "Elongated": [255, 200, 80],
+    "Spiculated": [255, 80, 160],
+    "Fragment": [180, 180, 100],
+    "Round Cell": [0, 220, 120],
+}
+
 MORPHOLOGY_COLORS = {
     "Normal": [80, 200, 80],
     "Sickle": [255, 80, 80],
@@ -84,7 +95,50 @@ def classify_geometric_shape(contour) -> str:
     return "Irregular"
 
 
-def classify_cell_morphology(contour) -> str:
+def classify_cell_shape(contour, median_area: float) -> str:
+    """Classify a contour into a diagnostically relevant cell shape."""
+    area = cv2.contourArea(contour)
+    peri = cv2.arcLength(contour, True)
+    if peri == 0:
+        return "Fragment"
+
+    circularity = 4 * np.pi * area / (peri * peri)
+    x, y, w, h = cv2.boundingRect(contour)
+    aspect = max(w, h) / min(w, h) if min(w, h) > 0 else 1
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    solidity = area / hull_area if hull_area > 0 else 1
+
+    # Very large contour likely contains multiple overlapping cells
+    if median_area > 0 and area > median_area * 3.0:
+        return "Cell Cluster"
+
+    # Tiny irregular piece = cell fragment / schistocyte
+    if median_area > 0 and area < median_area * 0.3 and circularity < 0.6:
+        return "Fragment"
+
+    # High aspect ratio = elongated / sickle-like
+    if aspect > 1.8:
+        return "Elongated"
+
+    # Low solidity = spiky edges (burr cells / echinocytes / acanthocytes)
+    if solidity < 0.78 and circularity < 0.7:
+        return "Spiculated"
+
+    # Size anomalies
+    if median_area > 0 and area > median_area * 1.6 and circularity > 0.5:
+        return "Large Cell"
+    if median_area > 0 and area < median_area * 0.5 and circularity > 0.5:
+        return "Small Cell"
+
+    # Normal round-ish cell
+    if circularity > 0.65:
+        return "Round Cell"
+
+    return "Fragment"
+
+
+def classify_cell_morphology(contour, roi_gray=None) -> str:
     """Classify RBC/cell morphology from contour shape metrics."""
     area = cv2.contourArea(contour)
     peri = cv2.arcLength(contour, True)
@@ -93,55 +147,87 @@ def classify_cell_morphology(contour) -> str:
 
     circularity = 4 * np.pi * area / (peri * peri)
     x, y, w, h = cv2.boundingRect(contour)
-    aspect = w / h if h > 0 else 1
+    aspect = max(w, h) / min(w, h) if min(w, h) > 0 else 1
     hull = cv2.convexHull(contour)
     hull_area = cv2.contourArea(hull)
     solidity = area / hull_area if hull_area > 0 else 1
 
-    # Elongated + low circularity = sickle
-    if aspect > 2.2 and circularity < 0.4:
+    # Count concavity defects for spiky-edge detection
+    defect_count = 0
+    if len(contour) >= 5:
+        hull_idx = cv2.convexHull(contour, returnPoints=False)
+        try:
+            defects = cv2.convexityDefects(contour, hull_idx)
+            if defects is not None:
+                for d in defects:
+                    depth = d[0][3] / 256.0
+                    if depth > 2.0:
+                        defect_count += 1
+        except cv2.error:
+            pass
+
+    # Sickle: highly elongated + low circularity
+    if aspect > 2.0 and circularity < 0.45:
         return "Sickle"
-    if (aspect > 1.8 or aspect < 0.55) and circularity < 0.5:
+    if aspect > 1.7 and circularity < 0.4:
         return "Sickle"
 
-    # Teardrop: elongated but more solid
-    if 1.5 < aspect < 2.2 and circularity < 0.55 and solidity > 0.85:
+    # Teardrop: moderately elongated, solid, asymmetric
+    if 1.4 < aspect < 2.1 and circularity < 0.55 and solidity > 0.82:
         return "Teardrop"
 
-    # Burr/Echinocyte: round-ish but spiky edges (low solidity)
-    if circularity > 0.5 and solidity < 0.80:
-        return "Burr/Echinocyte"
-
-    # Acanthocyte: very irregular edges
-    if solidity < 0.70:
+    # Acanthocyte: very irregular edges with deep projections
+    if solidity < 0.68 and defect_count >= 4:
         return "Acanthocyte"
 
-    # Spherocyte: very round, high circularity, small
-    if circularity > 0.90 and 0.9 <= aspect <= 1.1:
+    # Burr/Echinocyte: round-ish but spiky edges
+    if circularity > 0.45 and solidity < 0.80 and defect_count >= 3:
+        return "Burr/Echinocyte"
+
+    # Spherocyte: very round, compact
+    if circularity > 0.88 and 0.85 <= aspect <= 1.15 and solidity > 0.93:
         return "Spherocyte"
 
     # Elliptocyte: oval-shaped
-    if 1.3 < aspect < 1.8 and circularity > 0.55:
+    if 1.3 < aspect < 1.9 and circularity > 0.50:
         return "Elliptocyte"
 
-    # Target cell: round with central density (detected by contrast)
-    # Approximated here by moderate circularity + high solidity
-    if 0.70 < circularity < 0.85 and solidity > 0.92:
-        return "Target"
+    # Target cell: round with central pallor (check internal contrast)
+    if roi_gray is not None and 0.65 < circularity < 0.88 and solidity > 0.90:
+        mask = np.zeros(roi_gray.shape, dtype=np.uint8)
+        cv2.drawContours(mask, [contour], -1, 255, -1)
+        mean_val = cv2.mean(roi_gray, mask=mask)[0]
+        # Central region
+        cx, cy = x + w // 2, y + h // 2
+        r = min(w, h) // 4
+        center_mask = np.zeros_like(mask)
+        cv2.circle(center_mask, (cx, cy), max(r, 1), 255, -1)
+        combined = cv2.bitwise_and(mask, center_mask)
+        if cv2.countNonZero(combined) > 0:
+            center_mean = cv2.mean(roi_gray, mask=combined)[0]
+            # Target cells have lighter center then darker ring then lighter middle
+            if center_mean > mean_val * 1.1:
+                return "Target"
 
     return "Normal"
 
 
-def detect_shapes(frame: np.ndarray, min_area: int = 300) -> list[dict]:
-    """Detect geometric shapes via contour analysis."""
+def detect_shapes(frame: np.ndarray, min_area: int = 300,
+                   mode: str = "general") -> list[dict]:
+    """Detect shapes via contour analysis.
+
+    In blood_cell mode, classifies contours as diagnostically relevant cell
+    features (clusters, fragments, size anomalies).  In general mode, uses
+    geometric shape names.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
-    blurred = cv2.GaussianBlur(enhanced, (7, 7), 0)
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
     thresh = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 31, 10,
+        cv2.THRESH_BINARY_INV, 25, 8,
     )
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
@@ -149,15 +235,26 @@ def detect_shapes(frame: np.ndarray, min_area: int = 300) -> list[dict]:
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    # Compute median area for cell-size classification
+    areas = [cv2.contourArea(c) for c in contours if cv2.contourArea(c) >= min_area]
+    median_area = float(np.median(areas)) if areas else 0.0
+
+    is_blood = mode == "blood_cell"
+    color_map = CELL_SHAPE_COLORS if is_blood else SHAPE_COLORS
+
     shapes = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area:
             continue
 
-        shape_name = classify_geometric_shape(cnt)
+        if is_blood:
+            shape_name = classify_cell_shape(cnt, median_area)
+        else:
+            shape_name = classify_geometric_shape(cnt)
+
         x, y, w, h = cv2.boundingRect(cnt)
-        color = SHAPE_COLORS.get(shape_name, [160, 160, 160])
+        color = color_map.get(shape_name, [160, 160, 160])
 
         peri = cv2.arcLength(cnt, True)
         circularity = 4 * np.pi * area / (peri * peri) if peri > 0 else 0
@@ -207,7 +304,7 @@ def analyze_cell_morphology(frame: np.ndarray, bbox: list[int]) -> dict:
         return {"morphology": "Normal", "morph_color": MORPHOLOGY_COLORS["Normal"]}
 
     largest = max(contours, key=cv2.contourArea)
-    morph = classify_cell_morphology(largest)
+    morph = classify_cell_morphology(largest, roi_gray=gray)
     return {"morphology": morph, "morph_color": MORPHOLOGY_COLORS.get(morph, [200, 200, 200])}
 
 
@@ -273,7 +370,13 @@ class Detector:
         # --- YOLO detections ---
         model = self.current_model
         if model is not None:
-            results = model(frame, conf=self.conf_threshold, verbose=False)
+            results = model(
+                frame,
+                conf=self.conf_threshold,
+                iou=0.4,
+                augment=self.mode == "blood_cell",
+                verbose=False,
+            )
             for result in results:
                 boxes = result.boxes
                 if boxes is None:
@@ -308,7 +411,7 @@ class Detector:
 
         # --- Shape detections ---
         if self.shapes_enabled:
-            shapes = detect_shapes(frame)
+            shapes = detect_shapes(frame, mode=self.mode)
             # Remove shapes that overlap with YOLO detections
             yolo_boxes = [d["bbox"] for d in detections]
             for shape in shapes:
