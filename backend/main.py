@@ -540,7 +540,7 @@ async def voice_ws(websocket: WebSocket):
 
     await websocket.accept()
 
-    dg_url = "wss://agent.deepgram.com/agent"
+    dg_url = "wss://agent.deepgram.com/v1/agent/converse"
     dg_headers = {"Authorization": f"Token {api_key}"}
 
     try:
