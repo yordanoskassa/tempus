@@ -57,14 +57,30 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
     return bytes(chunks)
 
 
+def _resolve_host(host: str, port: int, timeout: float = 3) -> tuple:
+    """Resolve hostname with a timeout to avoid mDNS hangs."""
+    socket.setdefaulttimeout(timeout)
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+        if infos:
+            return infos[0][4]  # (ip, port)
+    finally:
+        socket.setdefaulttimeout(None)
+    raise OSError(f"Cannot resolve {host}")
+
+
 def _qnx_camera_receiver():
     """Keep the latest QNX Camera Module 3 frame in memory."""
     global qnx_frame, qnx_camera_connected
     while True:
         try:
-            with socket.create_connection((QNX_CAMERA_HOST, QNX_CAMERA_PORT), timeout=5) as sock:
-                sock.settimeout(10)
-                qnx_camera_connected = True
+            addr = _resolve_host(QNX_CAMERA_HOST, QNX_CAMERA_PORT, timeout=5)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect(addr)
+            sock.settimeout(10)
+            qnx_camera_connected = True
+            try:
                 while True:
                     magic, width, height, stride, uv_offset, uv_stride, _format, size = struct.unpack(
                         "!8I", _recv_exact(sock, 32)
@@ -87,9 +103,11 @@ def _qnx_camera_receiver():
                         raise ValueError("Incomplete QNX camera frame")
                     with qnx_frame_lock:
                         qnx_frame = frame
+            finally:
+                sock.close()
         except Exception:
             qnx_camera_connected = False
-            time.sleep(1)
+            time.sleep(2)
 
 
 threading.Thread(target=_qnx_camera_receiver, daemon=True).start()
