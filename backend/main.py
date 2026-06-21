@@ -51,7 +51,7 @@ PI_SSH_HOST = os.getenv("PI_SSH_HOST", "qnxuser@qnxpi27.local")
 PI_SSH_PASS = os.getenv("PI_SSH_PASS", "qnxuser")
 CAM_WIDTH = 640
 CAM_HEIGHT = 480
-CAM_FPS = 15
+CAM_FPS = 10
 
 camera_frame = None
 camera_frame_lock = threading.Lock()
@@ -67,41 +67,43 @@ def _kill_pi_camera_procs():
         "sshpass", "-p", PI_SSH_PASS,
         "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
         PI_SSH_HOST,
-        "slay cam_stream 2>/dev/null; slay camera_bridge 2>/dev/null; "
-        "slay camera_example3_viewfinder 2>/dev/null; slay qnx-camera-bridge 2>/dev/null; "
-        "slay ffmpeg 2>/dev/null",
+        "slay -f cam_stream 2>/dev/null; slay -f camera_bridge 2>/dev/null; "
+        "slay -f camera_example3_viewfinder 2>/dev/null",
     ]
     try:
         subprocess.run(cmd, timeout=15, capture_output=True)
-        time.sleep(1)
+        time.sleep(2)
     except Exception:
         pass
 
 
-class MJPEGReader:
-    """Reads individual JPEG frames from an MJPEG byte stream."""
+class FrameReader:
+    """Reads length-prefixed JPEG frames from cam_stream."""
 
     def __init__(self, stream):
         self._stream = stream
-        self._buf = bytearray()
 
     def read_frame(self):
-        """Read and return the next complete JPEG frame."""
-        while True:
-            # Try to find a complete frame in existing buffer
-            soi = self._buf.find(b"\xff\xd8")
-            if soi >= 0:
-                eoi = self._buf.find(b"\xff\xd9", soi + 2)
-                if eoi >= 0:
-                    frame = bytes(self._buf[soi:eoi + 2])
-                    self._buf = self._buf[eoi + 2:]
-                    return frame
+        """Read next frame: 4-byte big-endian length + JPEG data."""
+        hdr = self._read_exact(4)
+        if not hdr:
+            raise ConnectionError("Stream closed")
+        size = int.from_bytes(hdr, "big")
+        if size == 0 or size > 10_000_000:
+            raise ConnectionError(f"Invalid frame size: {size}")
+        data = self._read_exact(size)
+        if not data:
+            raise ConnectionError("Stream closed mid-frame")
+        return data
 
-            # Need more data
-            chunk = self._stream.read(16384)
+    def _read_exact(self, n):
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self._stream.read(n - len(buf))
             if not chunk:
-                raise ConnectionError("MJPEG stream closed")
-            self._buf.extend(chunk)
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
 
 
 def _pi_camera_reader():
@@ -110,12 +112,8 @@ def _pi_camera_reader():
 
     _kill_pi_camera_procs()
 
-    # Pipeline: cam_stream → ffmpeg MJPEG encoder → stdout
-    remote_cmd = (
-        f"/home/qnxuser/cam_stream -u 1 -w {CAM_WIDTH} -h {CAM_HEIGHT} -r {CAM_FPS} 2>/dev/null | "
-        f"ffmpeg -f rawvideo -pix_fmt nv12 -s {CAM_WIDTH}x{CAM_HEIGHT} -r {CAM_FPS} "
-        f"-i pipe:0 -f mjpeg -q:v 5 pipe:1 2>/dev/null"
-    )
+    # cam_stream outputs length-prefixed JPEG frames directly (no ffmpeg needed)
+    remote_cmd = f"/home/qnxuser/cam_stream -u 1 -r {CAM_FPS} -q 70 2>/dev/null"
     cmd = [
         "sshpass", "-p", PI_SSH_PASS,
         "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
@@ -138,8 +136,8 @@ def _pi_camera_reader():
                 continue
 
             camera_connected = True
-            print("[camera] Connected, reading MJPEG frames...")
-            reader = MJPEGReader(_cam_proc.stdout)
+            print("[camera] Connected, reading JPEG frames...")
+            reader = FrameReader(_cam_proc.stdout)
             warmup_done = False
 
             while not _stop_camera.is_set():
@@ -152,8 +150,7 @@ def _pi_camera_reader():
                 if frame is None:
                     continue
 
-                # Skip initial frames while auto-exposure settles
-                # During warm-up, R and B channels are near zero (green tint)
+                # Skip initial dark frames while auto-exposure settles
                 if not warmup_done:
                     b_mean = frame[:, :, 0].mean()
                     r_mean = frame[:, :, 2].mean()
@@ -161,6 +158,10 @@ def _pi_camera_reader():
                         continue
                     warmup_done = True
                     print("[camera] Auto-exposure settled, streaming frames")
+
+                # Scale down from native 2304x1296 to target resolution
+                if frame.shape[1] != CAM_WIDTH or frame.shape[0] != CAM_HEIGHT:
+                    frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
 
                 with camera_frame_lock:
                     camera_frame = frame
