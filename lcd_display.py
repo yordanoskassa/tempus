@@ -4,17 +4,18 @@ Fetches the MJPEG stream from VetrView backend and renders
 detection results on the ST7789V LCD connected via SPI GPIO.
 
 Run this on the Pi:
-    pip install spidev RPi.GPIO Pillow requests
+    pip install spidev RPi.GPIO numpy opencv-python-headless
     python lcd_display.py
 """
 
-import struct
 import time
+import struct
+from io import BytesIO
+from urllib.request import urlopen
 
+import numpy as np
 import RPi.GPIO as GPIO
 import spidev
-from PIL import Image
-import requests
 
 # --- Config ---
 VETRVIEW_HOST = "http://vetrview.local:8000"  # Mac running VetrView backend
@@ -42,13 +43,28 @@ CASET = 0x2A
 RASET = 0x2B
 RAMWR = 0x2C
 
-# MADCTL rotation values
 ROTATIONS = {
     0: 0x00,
     90: 0x60,
     180: 0xC0,
     270: 0xA0,
 }
+
+
+def _resize_nearest(img, src_h, src_w, dst_w, dst_h):
+    """Resize RGB numpy array using nearest-neighbor (no Pillow needed)."""
+    row_idx = (np.arange(dst_h) * src_h // dst_h).astype(int)
+    col_idx = (np.arange(dst_w) * src_w // dst_w).astype(int)
+    return img[row_idx][:, col_idx]
+
+
+def _rgb_to_rgb565(rgb: np.ndarray) -> bytearray:
+    """Convert HxWx3 uint8 RGB array to RGB565 big-endian bytes."""
+    r = rgb[:, :, 0].astype(np.uint16)
+    g = rgb[:, :, 1].astype(np.uint16)
+    b = rgb[:, :, 2].astype(np.uint16)
+    rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+    return bytearray(rgb565.astype(">u2").tobytes())
 
 
 class ST7789:
@@ -89,12 +105,12 @@ class ST7789:
         time.sleep(0.5)
         self._command(COLMOD, [0x55])  # 16-bit RGB565
         self._command(MADCTL, [ROTATIONS.get(LCD_ROTATION, 0x00)])
-        self._command(INVON)   # ST7789 needs inversion on
+        self._command(INVON)
         self._command(NORON)
         time.sleep(0.01)
         self._command(DISPON)
         time.sleep(0.1)
-        GPIO.output(BL_PIN, GPIO.HIGH)  # Backlight on
+        GPIO.output(BL_PIN, GPIO.HIGH)
 
     def set_window(self, x0, y0, x1, y1):
         self._command(CASET, [
@@ -106,39 +122,44 @@ class ST7789:
             (y1 >> 8) & 0xFF, y1 & 0xFF,
         ])
 
-    def display(self, image):
-        """Send a PIL Image to the LCD."""
+    def display_rgb(self, rgb: np.ndarray):
+        """Send an HxWx3 uint8 RGB numpy array to the LCD."""
+        src_h, src_w = rgb.shape[:2]
         if LCD_ROTATION in (90, 270):
-            img = image.resize((LCD_HEIGHT, LCD_WIDTH), Image.LANCZOS)
+            dst_w, dst_h = LCD_HEIGHT, LCD_WIDTH
         else:
-            img = image.resize((LCD_WIDTH, LCD_HEIGHT), Image.LANCZOS)
+            dst_w, dst_h = LCD_WIDTH, LCD_HEIGHT
 
-        img = img.convert("RGB")
-        w, h = img.size
+        resized = _resize_nearest(rgb, src_h, src_w, dst_w, dst_h)
+        data = _rgb_to_rgb565(resized)
 
-        # Convert to RGB565
-        pixels = img.tobytes()
-        rgb565 = bytearray(w * h * 2)
-        for i in range(0, len(pixels), 3):
-            r, g, b = pixels[i], pixels[i + 1], pixels[i + 2]
-            color = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-            j = (i // 3) * 2
-            rgb565[j] = (color >> 8) & 0xFF
-            rgb565[j + 1] = color & 0xFF
-
-        self.set_window(0, 0, w - 1, h - 1)
+        self.set_window(0, 0, dst_w - 1, dst_h - 1)
         self._command(RAMWR)
         GPIO.output(DC_PIN, GPIO.HIGH)
 
-        # Send in chunks (SPI buffer limit)
         chunk = 4096
-        for start in range(0, len(rgb565), chunk):
-            self.spi.writebytes2(rgb565[start:start + chunk])
+        for start in range(0, len(data), chunk):
+            self.spi.writebytes2(data[start:start + chunk])
 
     def off(self):
         GPIO.output(BL_PIN, GPIO.LOW)
         GPIO.cleanup()
         self.spi.close()
+
+
+def decode_jpeg_np(jpeg_bytes: bytes) -> np.ndarray:
+    """Decode JPEG bytes to RGB numpy array using OpenCV or turbojpeg."""
+    try:
+        import cv2
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is not None:
+            return bgr[:, :, ::-1]  # BGR -> RGB
+    except ImportError:
+        pass
+
+    # Fallback: minimal JPEG decode not available
+    raise RuntimeError("Install opencv-python-headless: pip install opencv-python-headless")
 
 
 def stream_to_lcd():
@@ -148,24 +169,22 @@ def stream_to_lcd():
 
     while True:
         try:
-            resp = requests.get(
-                f"{VETRVIEW_HOST}/qnx/stream",
-                stream=True,
-                timeout=10,
-            )
+            resp = urlopen(f"{VETRVIEW_HOST}/qnx/stream", timeout=10)
             buf = b""
-            for chunk in resp.iter_content(chunk_size=4096):
+            while True:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
                 buf += chunk
-                # Find JPEG boundaries
+                # Find JPEG frame boundaries
                 start = buf.find(b"\xff\xd8")
-                end = buf.find(b"\xff\xd9")
+                end = buf.find(b"\xff\xd9", start + 2 if start >= 0 else 0)
                 if start != -1 and end != -1 and end > start:
                     jpeg = buf[start:end + 2]
                     buf = buf[end + 2:]
                     try:
-                        from io import BytesIO
-                        img = Image.open(BytesIO(jpeg))
-                        lcd.display(img)
+                        rgb = decode_jpeg_np(jpeg)
+                        lcd.display_rgb(rgb)
                     except Exception:
                         pass
         except KeyboardInterrupt:
