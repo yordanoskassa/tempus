@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import subprocess
@@ -15,6 +16,14 @@ from fastapi.responses import Response, StreamingResponse
 from websockets.asyncio.client import connect as ws_connect
 
 from detector import Detector, decode_frame
+
+# Gemini (optional)
+try:
+    from google import genai
+    from google.genai import types as genai_types
+    _GENAI_AVAILABLE = True
+except ImportError:
+    _GENAI_AVAILABLE = False
 
 load_dotenv()
 
@@ -52,17 +61,6 @@ _receiver_thread = None
 _stop_camera = threading.Event()
 
 
-def _read_exact(stream, size):
-    """Read exactly `size` bytes from a binary stream."""
-    chunks = bytearray()
-    while len(chunks) < size:
-        chunk = stream.read(size - len(chunks))
-        if not chunk:
-            raise ConnectionError("cam_stream pipe closed")
-        chunks.extend(chunk)
-    return bytes(chunks)
-
-
 def _kill_pi_camera_procs():
     """Kill any existing camera processes on the Pi."""
     cmd = [
@@ -70,7 +68,8 @@ def _kill_pi_camera_procs():
         "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
         PI_SSH_HOST,
         "slay cam_stream 2>/dev/null; slay camera_bridge 2>/dev/null; "
-        "slay camera_example3_viewfinder 2>/dev/null; slay qnx-camera-bridge 2>/dev/null",
+        "slay camera_example3_viewfinder 2>/dev/null; slay qnx-camera-bridge 2>/dev/null; "
+        "slay ffmpeg 2>/dev/null",
     ]
     try:
         subprocess.run(cmd, timeout=15, capture_output=True)
@@ -79,59 +78,79 @@ def _kill_pi_camera_procs():
         pass
 
 
+class MJPEGReader:
+    """Reads individual JPEG frames from an MJPEG byte stream."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._buf = bytearray()
+
+    def read_frame(self):
+        """Read and return the next complete JPEG frame."""
+        while True:
+            # Try to find a complete frame in existing buffer
+            soi = self._buf.find(b"\xff\xd8")
+            if soi >= 0:
+                eoi = self._buf.find(b"\xff\xd9", soi + 2)
+                if eoi >= 0:
+                    frame = bytes(self._buf[soi:eoi + 2])
+                    self._buf = self._buf[eoi + 2:]
+                    return frame
+
+            # Need more data
+            chunk = self._stream.read(16384)
+            if not chunk:
+                raise ConnectionError("MJPEG stream closed")
+            self._buf.extend(chunk)
+
+
 def _pi_camera_reader():
-    """SSH into Pi, run cam_stream, read raw NV12 frames from stdout."""
+    """SSH into Pi, run cam_stream piped to ffmpeg for MJPEG output."""
     global camera_frame, camera_connected, _cam_proc
 
     _kill_pi_camera_procs()
 
+    # Pipeline: cam_stream → ffmpeg MJPEG encoder → stdout
+    remote_cmd = (
+        f"/home/qnxuser/cam_stream -u 1 -w {CAM_WIDTH} -h {CAM_HEIGHT} -r {CAM_FPS} 2>/dev/null | "
+        f"ffmpeg -f rawvideo -pix_fmt nv12 -s {CAM_WIDTH}x{CAM_HEIGHT} -r {CAM_FPS} "
+        f"-i pipe:0 -f mjpeg -q:v 5 pipe:1 2>/dev/null"
+    )
     cmd = [
         "sshpass", "-p", PI_SSH_PASS,
         "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
         PI_SSH_HOST,
-        f"/home/qnxuser/cam_stream -u 1 -w {CAM_WIDTH} -h {CAM_HEIGHT} -r {CAM_FPS}",
+        remote_cmd,
     ]
-
-    # NV12 frame size: width * height * 1.5
-    frame_size = CAM_WIDTH * CAM_HEIGHT * 3 // 2
 
     while not _stop_camera.is_set():
         try:
-            print(f"[camera] Starting cam_stream via SSH ({CAM_WIDTH}x{CAM_HEIGHT} NV12)...")
+            print(f"[camera] Starting cam_stream+ffmpeg via SSH ({CAM_WIDTH}x{CAM_HEIGHT} MJPEG)...")
             _cam_proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=frame_size
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=65536
             )
 
-            # Read stderr in background for diagnostics
-            def _read_stderr():
-                for line in _cam_proc.stderr:
-                    msg = line.decode(errors="replace").strip()
-                    if msg:
-                        print(f"[cam_stream] {msg}")
-            stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-            stderr_thread.start()
-
             # Wait briefly for process to start
-            time.sleep(0.5)
+            time.sleep(1)
             if _cam_proc.poll() is not None:
                 print("[camera] cam_stream exited immediately")
                 time.sleep(3)
                 continue
 
             camera_connected = True
-            print("[camera] Connected, reading frames...")
+            print("[camera] Connected, reading MJPEG frames...")
+            reader = MJPEGReader(_cam_proc.stdout)
 
             while not _stop_camera.is_set():
-                raw = _read_exact(_cam_proc.stdout, frame_size)
+                jpeg_data = reader.read_frame()
 
-                # Convert NV12 to BGR using OpenCV
-                nv12 = np.frombuffer(raw, dtype=np.uint8).reshape(
-                    CAM_HEIGHT * 3 // 2, CAM_WIDTH
+                # Decode JPEG to BGR using OpenCV
+                frame = cv2.imdecode(
+                    np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR
                 )
-                frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
-
-                with camera_frame_lock:
-                    camera_frame = frame
+                if frame is not None:
+                    with camera_frame_lock:
+                        camera_frame = frame
 
         except ConnectionError:
             print("[camera] cam_stream disconnected")
