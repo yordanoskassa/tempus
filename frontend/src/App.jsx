@@ -32,7 +32,15 @@ function HeaderBar({ backendConnected, cameraConnected, voiceActive, sessionElap
   return (
     <div className="header-bar">
       <div className="header-brand">
-        <h1>Temp<span>us</span></h1>
+        <svg className="brand-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="16" cy="16" r="14" stroke="currentColor" strokeWidth="2.5"/>
+          <circle cx="16" cy="16" r="6" fill="currentColor"/>
+          <line x1="16" y1="2" x2="16" y2="8" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          <line x1="16" y1="24" x2="16" y2="30" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          <line x1="2" y1="16" x2="8" y2="16" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          <line x1="24" y1="16" x2="30" y2="16" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+        </svg>
+        <h1>Tempus</h1>
         <span className="brand-sub">Hematology</span>
       </div>
       <div className="header-center">

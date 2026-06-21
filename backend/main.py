@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import socket
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -38,35 +39,109 @@ detector = Detector()
 _last_analytics = {}
 _last_analytics_lock = threading.Lock()
 
-PI_HOST = os.getenv("PI_HOST", "qnxpi27.local")
+PI_HOST = os.getenv("PI_HOST", "127.0.0.1")  # Through SSH tunnel
 PI_STREAM_PORT = int(os.getenv("PI_STREAM_PORT", "8765"))
+PI_SSH_HOST = os.getenv("PI_SSH_HOST", "qnxuser@qnxpi27.local")
+PI_SSH_PASS = os.getenv("PI_SSH_PASS", "qnxuser")
 
 camera_frame = None
 camera_frame_lock = threading.Lock()
 camera_connected = False
+_ssh_tunnel_proc = None
+_receiver_thread = None
+_stop_camera = threading.Event()
+
+
+def _ensure_ssh_tunnel():
+    """Start SSH tunnel forwarding PI_STREAM_PORT from Pi to localhost."""
+    global _ssh_tunnel_proc
+    if _ssh_tunnel_proc and _ssh_tunnel_proc.poll() is None:
+        # Check if tunnel is actually working
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(("127.0.0.1", PI_STREAM_PORT))
+            s.close()
+            return True
+        except Exception:
+            # Tunnel process alive but not forwarding — kill and retry
+            _ssh_tunnel_proc.terminate()
+            _ssh_tunnel_proc = None
+
+    cmd = [
+        "sshpass", "-p", PI_SSH_PASS,
+        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+        "-o", "ExitOnForwardFailure=yes",
+        "-N", "-L", f"{PI_STREAM_PORT}:127.0.0.1:{PI_STREAM_PORT}",
+        PI_SSH_HOST,
+    ]
+    try:
+        _ssh_tunnel_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Wait for tunnel to be ready
+        for _ in range(10):
+            time.sleep(1)
+            if _ssh_tunnel_proc.poll() is not None:
+                stderr = _ssh_tunnel_proc.stderr.read().decode(errors="replace")
+                print(f"SSH tunnel failed: {stderr}")
+                return False
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect(("127.0.0.1", PI_STREAM_PORT))
+                s.close()
+                return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def _ensure_pi_streamer():
+    """Ensure the pi_streamer.py is running on the Pi via SSH."""
+    # Check if already running by trying to see if port is bound
+    check_cmd = [
+        "sshpass", "-p", PI_SSH_PASS,
+        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+        PI_SSH_HOST,
+        "python3 -c \"import socket; s=socket.socket(); r=s.connect_ex(('127.0.0.1',8765)); print(r); s.close()\"",
+    ]
+    try:
+        result = subprocess.run(check_cmd, timeout=15, capture_output=True, text=True)
+        if result.stdout.strip() == "0":
+            return True  # Already running
+    except Exception:
+        pass
+
+    # Start it
+    start_cmd = [
+        "sshpass", "-p", PI_SSH_PASS,
+        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+        PI_SSH_HOST,
+        "nohup python3 /home/qnxuser/pi_streamer.py --test > /dev/null 2>&1 &",
+    ]
+    try:
+        subprocess.run(start_cmd, timeout=15, capture_output=True)
+        time.sleep(4)  # Give streamer time to start
+        return True
+    except Exception:
+        return False
 
 
 def _mjpeg_receiver():
-    """Connect to Pi MJPEG TCP stream and decode frames."""
+    """Connect to Pi MJPEG TCP stream (via SSH tunnel) and decode frames."""
     global camera_frame, camera_connected
-    while True:
+    while not _stop_camera.is_set():
         try:
-            socket.setdefaulttimeout(5)
-            infos = socket.getaddrinfo(PI_HOST, PI_STREAM_PORT, socket.AF_INET, socket.SOCK_STREAM)
-            socket.setdefaulttimeout(None)
-            if not infos:
-                raise OSError(f"Cannot resolve {PI_HOST}")
-            addr = infos[0][4]
-
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
-            sock.connect(addr)
+            sock.connect((PI_HOST, PI_STREAM_PORT))
             sock.settimeout(10)
             camera_connected = True
 
             buf = b""
             try:
-                while True:
+                while not _stop_camera.is_set():
                     chunk = sock.recv(65536)
                     if not chunk:
                         break
@@ -92,10 +167,25 @@ def _mjpeg_receiver():
                 sock.close()
         except Exception:
             camera_connected = False
-            time.sleep(2)
+            if not _stop_camera.is_set():
+                time.sleep(2)
+    camera_connected = False
 
 
-threading.Thread(target=_mjpeg_receiver, daemon=True).start()
+def _stop_camera_system():
+    """Stop SSH tunnel and receiver."""
+    global _ssh_tunnel_proc, _receiver_thread, camera_frame, camera_connected
+    _stop_camera.set()
+    if _ssh_tunnel_proc:
+        _ssh_tunnel_proc.terminate()
+        _ssh_tunnel_proc = None
+    if _receiver_thread:
+        _receiver_thread.join(timeout=5)
+        _receiver_thread = None
+    camera_connected = False
+    with camera_frame_lock:
+        camera_frame = None
+    _stop_camera.clear()
 
 
 @app.get("/health")
@@ -116,23 +206,48 @@ def voice_check():
 
 @app.post("/camera/start")
 def camera_start():
-    """Wait for the Pi camera connection to be established before responding."""
+    """Start Pi camera: launch streamer, SSH tunnel, and frame receiver."""
+    global _receiver_thread
+
+    # Already streaming?
     if camera_connected:
         with camera_frame_lock:
             if camera_frame is not None:
                 return {"status": "connected"}
-    # Wait up to 15 seconds for the receiver thread to connect and get a frame
-    deadline = time.time() + 15
+
+    # Step 1: Start streamer on Pi
+    if not _ensure_pi_streamer():
+        raise HTTPException(status_code=503, detail="Failed to start streamer on Pi via SSH")
+
+    # Step 2: Establish SSH tunnel
+    if not _ensure_ssh_tunnel():
+        raise HTTPException(status_code=503, detail="Failed to establish SSH tunnel to Pi")
+
+    # Step 3: Start receiver thread
+    if not _receiver_thread or not _receiver_thread.is_alive():
+        _stop_camera.clear()
+        _receiver_thread = threading.Thread(target=_mjpeg_receiver, daemon=True)
+        _receiver_thread.start()
+
+    # Step 4: Wait for first frame
+    deadline = time.time() + 10
     while time.time() < deadline:
-        if camera_connected:
-            with camera_frame_lock:
-                if camera_frame is not None:
-                    return {"status": "connected"}
-        time.sleep(0.5)
+        with camera_frame_lock:
+            if camera_frame is not None:
+                return {"status": "connected"}
+        time.sleep(0.3)
+
     raise HTTPException(
         status_code=503,
-        detail=f"Cannot reach camera stream at {PI_HOST}:{PI_STREAM_PORT} — check Pi is on and streamer is running",
+        detail="Connected to Pi but no frames received — check camera",
     )
+
+
+@app.post("/camera/stop")
+def camera_stop():
+    """Stop camera streaming."""
+    _stop_camera_system()
+    return {"status": "stopped"}
 
 
 @app.get("/camera/frame.jpg")
