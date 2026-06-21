@@ -297,6 +297,174 @@ def toggle_shapes(enabled: str):
     return {"shapes_enabled": detector.shapes_enabled}
 
 
+def _compute_analytics(detections, fw, fh, inference_ms=0):
+    """Extract analytics from detection results."""
+    yolo_dets = [d for d in detections if d.get("type") == "yolo"]
+    shape_dets = [d for d in detections if d.get("type") == "shape"]
+    areas = [d["bbox"][2] * d["bbox"][3] for d in yolo_dets]
+    frame_area = fw * fh
+
+    analytics = {
+        "inference_ms": inference_ms,
+        "frame_size": [fw, fh],
+        "cell_count": len(yolo_dets),
+        "shape_count": len(shape_dets),
+        "avg_cell_area": round(sum(areas) / len(areas)) if areas else 0,
+        "min_cell_area": min(areas) if areas else 0,
+        "max_cell_area": max(areas) if areas else 0,
+        "coverage_pct": round(sum(areas) / frame_area * 100, 1) if frame_area else 0,
+    }
+
+    morph_counts = {}
+    for d in yolo_dets:
+        m = d.get("morphology", "N/A")
+        morph_counts[m] = morph_counts.get(m, 0) + 1
+    analytics["morphology_counts"] = morph_counts
+
+    class_counts = {}
+    for d in yolo_dets:
+        class_counts[d["label"]] = class_counts.get(d["label"], 0) + 1
+    analytics["class_counts"] = class_counts
+
+    shape_counts = {}
+    for d in shape_dets:
+        shape_counts[d["label"]] = shape_counts.get(d["label"], 0) + 1
+    analytics["shape_counts"] = shape_counts
+
+    normal = morph_counts.get("Normal", 0)
+    total_morph = sum(morph_counts.values())
+    analytics["abnormal_pct"] = round(
+        (total_morph - normal) / total_morph * 100, 1
+    ) if total_morph > 0 else 0
+
+    return analytics
+
+
+def _call_gemini_analysis(jpeg_bytes, detections, analytics):
+    """Send image + detection context to Gemini for natural-language analysis.
+
+    Returns analysis text string, or None if unavailable.
+    """
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key or not _GENAI_AVAILABLE:
+        return None
+
+    try:
+        client = genai.Client(api_key=api_key)
+
+        # Build context from detections
+        cell_count = analytics.get("cell_count", 0)
+        abnormal_pct = analytics.get("abnormal_pct", 0)
+        morph = analytics.get("morphology_counts", {})
+        classes = analytics.get("class_counts", {})
+
+        context = (
+            f"YOLO detection found {cell_count} cells. "
+            f"Abnormal morphology: {abnormal_pct}%. "
+            f"Morphology breakdown: {json.dumps(morph)}. "
+            f"Class counts: {json.dumps(classes)}."
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                genai_types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"),
+                (
+                    "You are a veterinary hematology assistant analyzing a microscope image. "
+                    "The automated cell detection system has already run on this image. "
+                    f"Detection results: {context}\n\n"
+                    "Provide a concise clinical analysis (2-4 sentences) of what you see in this "
+                    "microscope field. Comment on cell morphology, any abnormalities, and clinical "
+                    "significance. Keep it professional and suitable for a lab report. "
+                    "If the image is not a microscope slide, just describe what you see briefly."
+                ),
+            ],
+        )
+        return response.text
+    except Exception as e:
+        print(f"[gemini] Analysis failed: {e}")
+        return None
+
+
+def _run_capture_pipeline():
+    """Grab current Pi camera frame, run YOLO, compute analytics, call Gemini.
+
+    Returns (detections, analytics, llm_analysis, image_b64) or raises.
+    """
+    with camera_frame_lock:
+        frame = None if camera_frame is None else camera_frame.copy()
+    if frame is None:
+        raise RuntimeError("Camera not streaming")
+
+    t0 = time.perf_counter()
+    fh, fw = frame.shape[:2]
+    detections = detector.detect(frame)
+    inference_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    analytics = _compute_analytics(detections, fw, fh, inference_ms)
+
+    # Cache analytics
+    with _last_analytics_lock:
+        _last_analytics.update(analytics)
+
+    # Encode frame as JPEG for Gemini and for returning to client
+    ok, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    jpeg_bytes = jpeg_buf.tobytes() if ok else b""
+
+    llm_analysis = _call_gemini_analysis(jpeg_bytes, detections, analytics) if jpeg_bytes else None
+
+    image_b64 = base64.b64encode(jpeg_bytes).decode("utf-8") if jpeg_bytes else ""
+
+    return detections, analytics, llm_analysis, image_b64
+
+
+@app.post("/capture/analyze")
+async def capture_analyze(request: Request):
+    """Capture a single frame, run detection + Gemini analysis."""
+    body = await request.json()
+    source = body.get("source", "pi")
+
+    if source == "pi":
+        try:
+            detections, analytics, llm_analysis, image_b64 = _run_capture_pipeline()
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+    else:
+        # Accept base64-encoded image from browser
+        image_data = body.get("image", "")
+        if not image_data:
+            raise HTTPException(status_code=400, detail="No image provided")
+        frame = decode_frame(image_data)
+        t0 = time.perf_counter()
+        fh, fw = frame.shape[:2]
+        detections = detector.detect(frame)
+        inference_ms = round((time.perf_counter() - t0) * 1000, 1)
+        analytics = _compute_analytics(detections, fw, fh, inference_ms)
+        with _last_analytics_lock:
+            _last_analytics.update(analytics)
+        ok, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        jpeg_bytes = jpeg_buf.tobytes() if ok else b""
+        llm_analysis = _call_gemini_analysis(jpeg_bytes, detections, analytics) if jpeg_bytes else None
+        image_b64 = base64.b64encode(jpeg_bytes).decode("utf-8") if jpeg_bytes else ""
+
+    # Compute alert level
+    abnormal = analytics.get("abnormal_pct", 0)
+    if abnormal > 30:
+        alert_level = "critical"
+    elif abnormal > 10:
+        alert_level = "warning"
+    else:
+        alert_level = "normal"
+
+    return {
+        "detections": detections,
+        "analytics": analytics,
+        "llm_analysis": llm_analysis,
+        "image_b64": image_b64,
+        "alert_level": alert_level,
+    }
+
+
 @app.websocket("/ws/detect")
 async def detect_ws(websocket: WebSocket):
     """WebSocket endpoint for real-time frame detection.
@@ -320,48 +488,7 @@ async def detect_ws(websocket: WebSocket):
                 detections = detector.detect(frame)
                 inference_ms = round((time.perf_counter() - t0) * 1000, 1)
 
-                # Compute analytics
-                yolo_dets = [d for d in detections if d.get("type") == "yolo"]
-                shape_dets = [d for d in detections if d.get("type") == "shape"]
-                areas = [d["bbox"][2] * d["bbox"][3] for d in yolo_dets]
-                frame_area = fw * fh
-
-                analytics = {
-                    "inference_ms": inference_ms,
-                    "frame_size": [fw, fh],
-                    "cell_count": len(yolo_dets),
-                    "shape_count": len(shape_dets),
-                    "avg_cell_area": round(sum(areas) / len(areas)) if areas else 0,
-                    "min_cell_area": min(areas) if areas else 0,
-                    "max_cell_area": max(areas) if areas else 0,
-                    "coverage_pct": round(sum(areas) / frame_area * 100, 1) if frame_area else 0,
-                }
-
-                # Morphology breakdown
-                morph_counts = {}
-                for d in yolo_dets:
-                    m = d.get("morphology", "N/A")
-                    morph_counts[m] = morph_counts.get(m, 0) + 1
-                analytics["morphology_counts"] = morph_counts
-
-                # Per-class counts
-                class_counts = {}
-                for d in yolo_dets:
-                    class_counts[d["label"]] = class_counts.get(d["label"], 0) + 1
-                analytics["class_counts"] = class_counts
-
-                # Per-shape counts
-                shape_counts = {}
-                for d in shape_dets:
-                    shape_counts[d["label"]] = shape_counts.get(d["label"], 0) + 1
-                analytics["shape_counts"] = shape_counts
-
-                # Abnormality ratio
-                normal = morph_counts.get("Normal", 0)
-                total_morph = sum(morph_counts.values())
-                analytics["abnormal_pct"] = round(
-                    (total_morph - normal) / total_morph * 100, 1
-                ) if total_morph > 0 else 0
+                analytics = _compute_analytics(detections, fw, fh, inference_ms)
 
                 # Cache analytics for /alerts endpoint
                 with _last_analytics_lock:
@@ -519,9 +646,28 @@ def build_voice_settings() -> dict:
                     "microscopy lab. You help lab technicians understand cell detection results, "
                     "morphology findings, and answer questions about the analysis.\n\n"
                     "Current detector state:\n" + context + "\n\n"
+                    "You have a function called capture_and_analyze that captures and analyzes "
+                    "the current microscope field of view. When the user asks you to capture, "
+                    "analyze, take a snapshot, or examine the slide, call this function. "
+                    "After calling it, summarize the results for the user in spoken-friendly language.\n\n"
                     "Keep answers concise and spoken-friendly. Use plain language. "
-                    "If asked about results you don't have, say the user should run detection first."
+                    "If asked about results you don't have, suggest they capture the current view."
                 ),
+                "functions": [
+                    {
+                        "name": "capture_and_analyze",
+                        "description": (
+                            "Capture the current microscope field of view, run cell detection, "
+                            "and analyze the image. Call this when the user asks to capture, "
+                            "analyze, take a snapshot, or examine the current slide."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                    }
+                ],
             },
             "speak": {
                 "provider": {
@@ -567,13 +713,90 @@ async def voice_ws(websocket: WebSocket):
                     pass
 
             async def deepgram_to_browser():
-                """Forward Deepgram responses to browser."""
+                """Forward Deepgram responses to browser, intercepting function calls."""
                 try:
                     async for msg in dg_ws:
                         if isinstance(msg, bytes):
                             await websocket.send_bytes(msg)
                         else:
-                            await websocket.send_text(msg)
+                            # Check for FunctionCallRequest
+                            try:
+                                parsed = json.loads(msg)
+                            except (json.JSONDecodeError, TypeError):
+                                await websocket.send_text(msg)
+                                continue
+
+                            if (
+                                parsed.get("type") == "FunctionCallRequest"
+                                and parsed.get("function_name") == "capture_and_analyze"
+                            ):
+                                call_id = parsed.get("function_call_id", "")
+                                print(f"[voice] Capture requested via voice (call_id={call_id})")
+
+                                # Run capture pipeline
+                                try:
+                                    detections, analytics, llm_analysis, image_b64 = (
+                                        await asyncio.to_thread(_run_capture_pipeline)
+                                    )
+                                    abnormal = analytics.get("abnormal_pct", 0)
+                                    alert_level = (
+                                        "critical" if abnormal > 30
+                                        else "warning" if abnormal > 10
+                                        else "normal"
+                                    )
+
+                                    # Build spoken summary for Deepgram
+                                    cell_count = analytics.get("cell_count", 0)
+                                    morph = analytics.get("morphology_counts", {})
+                                    summary_parts = [f"I captured and analyzed the current field of view."]
+                                    summary_parts.append(f"I detected {cell_count} cells.")
+                                    if abnormal > 0:
+                                        summary_parts.append(
+                                            f"{abnormal}% show atypical morphology."
+                                        )
+                                    abn_types = {
+                                        k: v for k, v in morph.items()
+                                        if k not in ("Normal", "N/A")
+                                    }
+                                    if abn_types:
+                                        parts = [f"{v} {k}" for k, v in abn_types.items()]
+                                        summary_parts.append(
+                                            f"Abnormal types: {', '.join(parts)}."
+                                        )
+                                    if llm_analysis:
+                                        summary_parts.append(llm_analysis)
+                                    spoken_result = " ".join(summary_parts)
+
+                                    # Send FunctionCallResponse to Deepgram
+                                    fn_response = {
+                                        "type": "FunctionCallResponse",
+                                        "function_call_id": call_id,
+                                        "output": spoken_result,
+                                    }
+                                    await dg_ws.send(json.dumps(fn_response))
+
+                                    # Send capture result to browser for UI update
+                                    capture_msg = {
+                                        "type": "capture_result",
+                                        "detections": detections,
+                                        "analytics": analytics,
+                                        "llm_analysis": llm_analysis,
+                                        "image_b64": image_b64,
+                                        "alert_level": alert_level,
+                                    }
+                                    await websocket.send_text(json.dumps(capture_msg))
+
+                                except Exception as e:
+                                    print(f"[voice] Capture failed: {e}")
+                                    fn_response = {
+                                        "type": "FunctionCallResponse",
+                                        "function_call_id": call_id,
+                                        "output": f"Capture failed: {str(e)}",
+                                    }
+                                    await dg_ws.send(json.dumps(fn_response))
+                            else:
+                                # Forward other messages to browser
+                                await websocket.send_text(msg)
                 except Exception:
                     pass
 
