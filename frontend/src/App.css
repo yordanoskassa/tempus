@@ -306,6 +306,141 @@ header h1 span {
   background: rgba(79, 195, 247, 0.1);
 }
 
+/* Voice Assistant Panel */
+.voice-panel h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #666;
+  margin-bottom: 12px;
+}
+
+.voice-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.voice-btn {
+  padding: 8px 16px;
+  border: 1px solid #2a2a3e;
+  border-radius: 6px;
+  background: #14141e;
+  color: #ccc;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.voice-btn:hover {
+  background: #1a1a2e;
+  border-color: #3a3a5e;
+}
+
+.voice-btn-active {
+  background: #3a1a1a;
+  border-color: #ff6b6b;
+  color: #ff6b6b;
+}
+
+.voice-btn-active:hover {
+  background: #4a2020;
+}
+
+.voice-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #666;
+}
+
+.voice-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #555;
+}
+
+.voice-status-listening .voice-status-dot {
+  background: #4caf50;
+  animation: voice-pulse 1.5s ease-in-out infinite;
+}
+
+.voice-status-listening {
+  color: #4caf50;
+}
+
+.voice-status-speaking .voice-status-dot {
+  background: #4fc3f7;
+  animation: voice-pulse 0.8s ease-in-out infinite;
+}
+
+.voice-status-speaking {
+  color: #4fc3f7;
+}
+
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.voice-error {
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: #2a1515;
+  border: 1px solid #ff6b6b;
+  border-radius: 6px;
+  color: #ff6b6b;
+  font-size: 12px;
+}
+
+.voice-transcript {
+  margin-top: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.voice-msg {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.voice-msg-user {
+  background: #1a2a1a;
+  border: 1px solid #2a3a2a;
+}
+
+.voice-msg-assistant {
+  background: #14141e;
+  border: 1px solid #1a1a2e;
+}
+
+.voice-msg-role {
+  font-weight: 600;
+  color: #888;
+  margin-right: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.voice-msg-user .voice-msg-role {
+  color: #4caf50;
+}
+
+.voice-msg-assistant .voice-msg-role {
+  color: #4fc3f7;
+}
+
+.voice-msg-text {
+  color: #ccc;
+}
+
 @media (max-width: 768px) {
   .main-content {
     flex-direction: column;

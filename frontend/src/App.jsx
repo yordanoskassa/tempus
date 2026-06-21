@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import "./App.css";
+import VoiceAgent from "./VoiceAgent";
 
 const WS_URL = "ws://localhost:8000/ws/detect";
 const API_URL = "http://localhost:8000";
@@ -429,6 +430,10 @@ function App() {
               </ul>
             </div>
           )}
+
+          <div className="sidebar-section">
+            <VoiceAgent />
+          </div>
         </div>
       </div>
 
